@@ -5,9 +5,9 @@ on:
   # carrying write access; a stolen git push credential carries neither, so it can no longer start a
   # release by landing a commit. that is the shape of the 2026-09-21 nubjs/nub compromise, where a
   # stolen push credential cut a tag and 18 packages published unattended. bumping the version in
-  # package.json is therefore inert until someone runs `gh workflow run publish.yml -R
-  # pullfrog/pullfrog`. the version is still read from package.json, so what ships is unchanged;
-  # only the trigger is.
+  # package.json is therefore inert until a maintainer runs `gh workflow run publish.yml -R
+  # pullfrog/pullfrog`, and the staged version then still needs their 2FA approval before npm serves
+  # it. the version is still read from package.json, so what ships is unchanged; only the trigger is.
   workflow_dispatch:
 
 permissions:
@@ -17,11 +17,11 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # npm holds a new version in automated review before serving it, and the wait
-    # below has to outlast that hold rather than fail on it (see its comment for
-    # the measurements). 360 is GitHub's hard cap for a hosted runner, not a
-    # tunable; the wait is set under it so the step, not the job, reports a stall.
-    # this repo is public, so an idle runner costs nothing.
+    # this job stages a version and then waits for a maintainer to approve it with
+    # 2FA, so the wait below has to outlast a human as well as npm's automated
+    # review (see its comment for the measurements). 360 is GitHub's hard cap for a
+    # hosted runner, not a tunable; the wait is set under it so the step, not the
+    # job, reports a stall. this repo is public, so an idle runner costs nothing.
     timeout-minutes: 360
     steps:
       # a step, not a job-level `if:`: a skipped job is silent, and the run would go
@@ -55,6 +55,16 @@ jobs:
           cache: "pnpm"
           registry-url: "https://registry.npmjs.org"
 
+      # `npm stage publish` landed in npm 11.15, and the npm bundled with Node 24 lags it.
+      - name: Install an npm CLI that can stage
+        run: | # zizmor: ignore[adhoc-packages] the npm CLI itself, pinned to the major that carries `npm stage`
+          npm install -g npm@11
+          v="$(npm --version)"
+          # `sort -V | head -1` yields the smaller of the two; it must be the floor.
+          [ "$(printf '%s\n11.15.0\n' "$v" | sort -V | head -1)" = "11.15.0" ] \
+            || { echo "::error::npm $v cannot stage (need >= 11.15)"; exit 1; }
+          echo "npm $v"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -86,48 +96,83 @@ jobs:
         run: |
           if curl -sf "https://registry.npmjs.org/pullfrog/${{ steps.version.outputs.version }}" > /dev/null; then
             echo "published=true" >> $GITHUB_OUTPUT
-            echo "ℹ️ npm already serves ${{ steps.version.outputs.version }} - skipping publish"
+            echo "ℹ️ npm already serves ${{ steps.version.outputs.version }} - skipping the staging step"
           else
             echo "published=false" >> $GITHUB_OUTPUT
-            echo "✅ ${{ steps.version.outputs.version }} is not on npm yet - will publish"
+            echo "✅ ${{ steps.version.outputs.version }} is not on npm yet - will stage it"
           fi
 
-      # a publish that npm has already accepted into review is refused on a re-run with
-      # `E409 Cannot publish over previously staged version` — the version is on its way
-      # to the registry, so that refusal is success here and the wait below decides the
-      # rest (0.1.71 died on exactly it and left `v0` two versions behind for 19h). any
-      # other publish error is fatal.
-      - name: Publish to npm
-        id: publish
+      # this stages, it does not publish. the trusted publisher for `pullfrog` is
+      # stage-only, so a run can put a version in npm's staged queue and nothing else; a
+      # maintainer then approves it with 2FA, which is a proof of presence no stolen
+      # credential can supply. the wait below is what observes that approval.
+      #
+      # `continue-on-error` came off with the token-era publish it protected: staging must
+      # fail loudly. the one refusal it existed for is now handled in line — npm reserves
+      # the version number while it is staged, so a re-run before the approval is refused,
+      # and that refusal is success here (0.1.71 died on exactly it and left `v0` two
+      # versions behind for 19h). the wording is matched loosely because the first
+      # stage-only release is where it gets observed; anything else is fatal.
+      - name: Stage the release on npm
+        id: stage
         if: steps.check_npm.outputs.published == 'false'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           out="$(mktemp)"
-          if npm publish --provenance --access public >"$out" 2>&1; then
+          if npm stage publish --provenance --access public >"$out" 2>&1; then
             cat "$out"
             exit 0
           fi
           cat "$out"
           if grep -qiE 'already (been )?staged|staged version|E409|EPUBLISHCONFLICT|previously published' "$out"; then
-            echo "ℹ️ $VERSION is already in review or published - the wait decides the rest"
+            echo "ℹ️ $VERSION is already staged or published - the approval wait decides the rest"
             exit 0
           fi
-          echo "::error::publishing $VERSION failed"
+          echo "::error::staging $VERSION failed"
           exit 1
+
+      # its own step, teed to the log: a step summary reaches the job view only when its step
+      # ends and the run page only when the job does, so written inside the wait below these
+      # commands stayed unreadable for the whole window they exist to serve.
+      - name: Post the approval commands
+        if: steps.check_npm.outputs.published == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "## Staged on npm - waiting for approval"
+            echo
+            echo "\`pullfrog@$VERSION\` is staged and is not installable until a maintainer approves it with 2FA. No tag moves and no release is created until then."
+            echo
+            echo '```'
+            echo "npm stage list pullfrog"
+            echo "npm stage approve <id>"
+            echo "pnpm stage approve"
+            echo '```'
+            echo
+            echo "\`npm stage list\` prints the stage ids. \`npm stage approve\` takes one id per call; \`pnpm stage approve\` (pnpm 12+) approves a batch with one one-time password. The Staged Packages tab on npmjs.com does the same."
+            echo
+            echo "The next step waits 350 minutes. If the approval comes later, re-run the job: it skips the staging, sees the version served, and converges the tags and the release."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       # the release invariant: the major tag must never advance past what npm actually
       # serves, because the action bakes `pullfrog@^<own version>` into its npx spec, so
       # a major tag ahead of npm is ETARGET on every consumer run. confirm rather than
       # assume before any tag moves.
       #
-      # npm holds a new version in automated review before serving it, and the version
-      # simply does not exist until that finishes. Measured here: 0.1.70 sat 3.5 minutes,
-      # 0.1.71 sat ~54, 0.1.72 sat 236. zod sees the same thing (16, 25, 116). None of
-      # those is an upper bound, so the window is 350 minutes, the most that fits under
-      # the job's 360-minute cap — an expiry here means something is wrong, not merely slow.
-      - name: Wait for npm to serve the version
+      # this is the human gate, and it is deliberately the same loop that used to wait out
+      # npm's automated review: a staged version is not served either, so registry
+      # liveness answers both questions at once. everything below it — the tags, the
+      # release — therefore exists only for a version a maintainer approved.
+      #
+      # the old budget already had to outlast the review hold (measured here: 0.1.70 sat
+      # 3.5 minutes, 0.1.71 ~54, 0.1.72 236; zod sees 16, 25, 116). an approval is a human
+      # walking to a second factor, so the window goes to 350 minutes, the most that fits
+      # under the job's 360-minute cap. past it the step fails rather than the job timing
+      # out, so the log says what to do: approve, then re-run.
+      - name: Wait for the maintainer's approval
         id: wait
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -139,11 +184,11 @@ jobs:
               exit 0
             fi
             if [ $((i % 15)) -eq 0 ]; then
-              echo "waiting for npm to serve $VERSION ($i minutes)"
+              echo "waiting for the staged $VERSION to be approved and served ($i minutes)"
             fi
             sleep 60
           done
-          echo "::error::npm never served $VERSION in 350min; refusing to move $MAJOR_TAG. see the publish step's log for why, then re-run this job"
+          echo "::error::npm never served $VERSION in 350min; refusing to move $MAJOR_TAG. approve the staged version and re-run this job, or see the staging step's log for why it never staged"
           exit 1
 
       - name: Create and push tags
@@ -198,11 +243,11 @@ jobs:
           if [[ "${{ steps.check_npm.outputs.published }}" == "true" ]]; then
             echo "ℹ️ Version ${{ steps.version.outputs.version }} was already on npm - re-converged tags and release" >> $GITHUB_STEP_SUMMARY
           elif [[ "${{ steps.wait.outcome }}" == "success" ]]; then
-            echo "✅ Published ${{ steps.version.outputs.version }} and npm serves it" >> $GITHUB_STEP_SUMMARY
-          elif [[ "${{ steps.publish.outcome }}" == "success" ]]; then
-            echo "⏳ Published ${{ steps.version.outputs.version }}, but npm did not serve it in time - re-run the job once it does." >> $GITHUB_STEP_SUMMARY
+            echo "✅ A maintainer approved the staged ${{ steps.version.outputs.version }} and npm serves it" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ steps.stage.outcome }}" == "success" ]]; then
+            echo "⏳ Staged ${{ steps.version.outputs.version }} on npm, not approved in time. Nothing below it exists until a maintainer approves it with 2FA - approve it, then re-run the job." >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ Publishing ${{ steps.version.outputs.version }} failed - see the publish step's log" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Staging ${{ steps.version.outputs.version }} failed - see the staging step's log" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🏷️ Tags" >> $GITHUB_STEP_SUMMARY
