@@ -3,6 +3,7 @@ import { statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Octokit, RestEndpointMethodTypes } from "@octokit/rest";
 import { type } from "arktype";
+import * as yes from "yes";
 import { primaryRepoState, type RepoToolState, requireRepoState } from "../toolState.ts";
 import { createChangeImpactArtifact } from "../utils/changeImpact.ts";
 import { log } from "../utils/cli.ts";
@@ -11,7 +12,6 @@ import { $git, $gitFetchWithDeepen, DEEPEN_RETRY_DEPTH } from "../utils/gitAuth.
 import { executeLifecycleHook } from "../utils/lifecycle.ts";
 import { computeIncrementalDiff } from "../utils/rangeDiff.ts";
 import { $ } from "../utils/shell.ts";
-import * as yes from "../yes/index.ts";
 import { rejectIfLeadingDash } from "./git.ts";
 import { commentableLinesForFile } from "./review.ts";
 import type { ToolContext } from "./server.ts";

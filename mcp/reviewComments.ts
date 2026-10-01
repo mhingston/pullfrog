@@ -2,11 +2,11 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Octokit } from "@octokit/rest";
 import { type } from "arktype";
+import * as yes from "yes";
 import { resolveBodyAssets } from "../utils/body.ts";
 import { stripExistingFooter } from "../utils/buildPullfrogFooter.ts";
 import { isPullfrog } from "../utils/isPullfrog.ts";
 import { log } from "../utils/log.ts";
-import * as yes from "../yes/index.ts";
 import type { ToolContext } from "./server.ts";
 import { execute, tool } from "./shared.ts";
 

@@ -16,7 +16,7 @@
 
 import arg from "arg";
 import pc from "picocolors";
-import * as yes from "../yes/index.ts";
+import * as yes from "yes";
 import {
   isTerminal,
   pollPrEvents,

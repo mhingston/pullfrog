@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import * as core from "@actions/core";
 import { throttling } from "@octokit/plugin-throttling";
 import { Octokit } from "@octokit/rest";
-import * as yes from "../yes/index.ts";
+import * as yes from "yes";
 import { apiFetch } from "./apiFetch.ts";
 import { maskSecret } from "./secretCommands.ts";
 

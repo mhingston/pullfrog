@@ -19,9 +19,9 @@
  *   - 404 → `TransientError` (stale repo↔account link — re-homes on next webhook)
  */
 
+import * as yes from "yes";
 import { DEFAULT_PROXY_MODEL, isCardGatedModel, resolveOpenRouterModel } from "../models.ts";
 import type { ToolState } from "../toolState.ts";
-import * as yes from "../yes/index.ts";
 import { apiFetch } from "./apiFetch.ts";
 import { isLocalApiUrl } from "./apiUrl.ts";
 import {

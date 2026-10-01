@@ -1,7 +1,7 @@
 import type { Octokit } from "@octokit/rest";
+import * as yes from "yes";
 import type { RouterTier } from "../models.ts";
 import packageJson from "../package.json" with { type: "json" };
-import * as yes from "../yes/index.ts";
 import type { CommercialRefusal } from "./billingErrors.ts";
 import { log } from "./cli.ts";
 import { mintIdToken, type OctokitWithPlugins, parseRepoContext } from "./github.ts";

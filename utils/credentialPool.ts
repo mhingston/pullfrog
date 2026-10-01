@@ -1,3 +1,4 @@
+import * as yes from "yes";
 import { autoSelectModel } from "../agents/opencodeShared.ts";
 import {
   getModelEnvVars,
@@ -7,7 +8,6 @@ import {
   resolveCliModel,
   stripProviderPrefix,
 } from "../models.ts";
-import * as yes from "../yes/index.ts";
 import { resolveAgent } from "./agent.ts";
 import { apiFetch } from "./apiFetch.ts";
 import { log } from "./cli.ts";

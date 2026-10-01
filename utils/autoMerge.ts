@@ -1,6 +1,6 @@
+import * as yes from "yes";
 import { addFooter } from "../mcp/comment.ts";
 import type { ToolContext } from "../mcp/server.ts";
-import * as yes from "../yes/index.ts";
 import { log } from "./cli.ts";
 import { isPullfrog } from "./isPullfrog.ts";
 import { isTransientOctokitError } from "./isTransientNetworkError.ts";

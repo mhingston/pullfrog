@@ -1,5 +1,6 @@
 import type { RestEndpointMethodTypes } from "@octokit/rest";
 import { type } from "arktype";
+import * as yes from "yes";
 import { formatMcpToolRef } from "../external.ts";
 import { type CommentableLines, primaryRepoState } from "../toolState.ts";
 import { getApiUrl } from "../utils/apiUrl.ts";
@@ -10,7 +11,6 @@ import { fixDoubleEscapedString } from "../utils/fixDoubleEscapedString.ts";
 import { isPullfrog } from "../utils/isPullfrog.ts";
 import { countOutstandingPullfrogThreads } from "../utils/outstandingThreads.ts";
 import { patchWorkflowRunFields } from "../utils/patchWorkflowRunFields.ts";
-import * as yes from "../yes/index.ts";
 import { deleteProgressComment } from "./comment.ts";
 import type { ToolContext } from "./server.ts";
 import { execute, getHttpStatus, tool } from "./shared.ts";

@@ -1,6 +1,6 @@
+import * as yes from "yes";
 import type { AgentUsage } from "../agents/shared.ts";
 import type { ToolContext } from "../mcp/server.ts";
-import * as yes from "../yes/index.ts";
 import { apiFetch } from "./apiFetch.ts";
 import { log } from "./cli.ts";
 import { isTransientNetworkError } from "./isTransientNetworkError.ts";

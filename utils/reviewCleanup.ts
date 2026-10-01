@@ -1,7 +1,7 @@
+import * as yes from "yes";
 import type { WriteablePayload } from "../external.ts";
 import { reportReviewNodeId } from "../mcp/review.ts";
 import type { ToolContext } from "../mcp/server.ts";
-import * as yes from "../yes/index.ts";
 import { log } from "./cli.ts";
 import { isTransientOctokitError } from "./isTransientNetworkError.ts";
 
