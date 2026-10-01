@@ -132,7 +132,7 @@ export async function runCli(input: { args: string[]; prog: string; showHelp: bo
   const poll = yes.op(pollPrEvents, {
     name: "pr-events poll",
     retries: [1000, 2000, 5000, 10_000, 15_000],
-    bail: isTerminal,
+    rethrow: isTerminal,
   });
 
   // daemon loop — the loop is the whole command. `yes.op` smooths transient

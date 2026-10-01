@@ -88,7 +88,7 @@ export async function patchWorkflowRunFields(
         name: "patchWorkflowRunFields",
         // only retry transient network errors; explicit HTTP failures throw
         // a status-bearing message and should fail fast.
-        bail: (error) => !isTransientNetworkError(error),
+        rethrow: (error) => !isTransientNetworkError(error),
       }
     )();
   } catch (error) {

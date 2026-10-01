@@ -787,7 +787,7 @@ export function CreatePullRequestReviewTool(ctx: ToolContext) {
         // which all cite the specific cause) clears on its own instead of
         // surfacing through the generic 422 handler — that framing sent the
         // agent dropping valid inline comments chasing a non-issue.
-        // `bail` scopes retries to the transient body only, so real
+        // `rethrow` scopes retries to the transient body only, so real
         // validation 422s still fail fast.
         let result;
         try {
@@ -802,7 +802,7 @@ export function CreatePullRequestReviewTool(ctx: ToolContext) {
                 : createReviewWithStrandedRecovery(ctx, params),
             {
               retries: TRANSIENT_REVIEW_RETRY_DELAYS_MS,
-              bail: (err) => !isTransientReviewError(err),
+              rethrow: (err) => !isTransientReviewError(err),
               name: "review submission",
             }
           )();

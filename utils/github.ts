@@ -480,7 +480,7 @@ export async function acquireNewToken(opts?: AcquireTokenOptions): Promise<strin
     return await yes.op(() => acquireTokenViaOIDC(opts), {
       name: "token exchange",
       retries: [1000, 2000],
-      bail: (error) => !isTransientTokenError(error),
+      rethrow: (error) => !isTransientTokenError(error),
     })();
   }
   // running inside GitHub Actions but the OIDC env vars are absent — the

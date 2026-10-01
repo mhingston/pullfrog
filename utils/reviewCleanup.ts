@@ -108,7 +108,7 @@ async function dispatchFollowUpReReview(ctx: ToolContext, reviewedSha: string): 
     {
       name: "reReviewDispatch",
       retries: [500, 2000],
-      bail: (error) => !isTransientOctokitError(error),
+      rethrow: (error) => !isTransientOctokitError(error),
     }
   )();
 }

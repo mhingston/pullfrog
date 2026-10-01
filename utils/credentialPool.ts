@@ -58,7 +58,7 @@ const select = yes.op(
   },
   {
     retries: [250, 1000],
-    bail: (error) =>
+    rethrow: (error) =>
       error instanceof Error &&
       typeof error.cause === "number" &&
       error.cause >= 400 &&

@@ -42,7 +42,6 @@
     "@standard-schema/spec": "1.1.0",
     "@toon-format/toon": "^1.0.0",
     "@types/node": "^24.7.2",
-    "@types/object-hash": "^3.0.6",
     "@types/semver": "^7.7.1",
     "@types/turndown": "^5.0.5",
     "agent-browser": "0.25.4",
@@ -56,8 +55,6 @@
     "fastmcp": "^3.34.0",
     "file-type": "^21.3.0",
     "husky": "^9.0.0",
-    "lru-cache": "^11.0.0",
-    "object-hash": "^3.0.0",
     "opencode-ai": "1.18.29",
     "package-manager-detector": "^1.6.0",
     "picocolors": "^1.1.1",
@@ -69,6 +66,7 @@
     "undici": "^7.22.0",
     "vitest": "^4.0.17",
     "yaml": "^2.8.2",
+    "yes": "0.0.3",
     "zod": "4.3.6"
   },
   "repository": {
