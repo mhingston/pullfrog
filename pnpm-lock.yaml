@@ -126,8 +126,8 @@ importers:
         specifier: ^2.8.2
         version: 2.9.1
       yes:
-        specifier: 0.0.3
-        version: 0.0.3
+        specifier: 0.1.0
+        version: 0.1.0
       zod:
         specifier: 4.3.6
         version: 4.3.6
@@ -1349,10 +1349,6 @@ packages:
     resolution: {integrity: sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg==}
     engines: {node: '>=0.10.0'}
 
-  object-hash@3.0.0:
-    resolution: {integrity: sha512-RSn9F68PjH9HqtltsSnqYC1XXoWe9Bju5+213R98cNGttag9q9yAOTzdbsqvIa7aNm5WffBZFpWYr2aWrklWAw==}
-    engines: {node: '>= 6'}
-
   object-inspect@1.13.4:
     resolution: {integrity: sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew==}
     engines: {node: '>= 0.4'}
@@ -1875,8 +1871,8 @@ packages:
     resolution: {integrity: sha512-9OpKOLeaoNFecEp7P6iYbzze/5CqWoH7N3SMs/6y1XF4nMvFMspEGZzJ6uFi9MmQwXhyzqYoSEKO3tvA3Z/o2w==}
     engines: {node: ^20.19.0 || ^22.12.0 || >=23}
 
-  yes@0.0.3:
-    resolution: {integrity: sha512-NXMMLnKzkQ8Iw0g2joWqHEAqdWRWlZS58mhLJlAYTWOWjmr/ech6HUAXerf478+BrqHv5RPU4yr9nBVpLYQSSg==}
+  yes@0.1.0:
+    resolution: {integrity: sha512-YpBxd3Y7b605g+1jQjVYvYON/hhL4D4g3Hw4QcVPj5lk1j/0mBXO93Xb0XFUww2QLRquCq4N6x+KXVl1NGgIyA==}
     engines: {node: '>=24'}
     hasBin: true
 
@@ -2981,8 +2977,6 @@ snapshots:
 
   object-assign@4.1.1: {}
 
-  object-hash@3.0.0: {}
-
   object-inspect@1.13.4: {}
 
   obug@2.2.1: {}
@@ -3417,10 +3411,9 @@ snapshots:
       y18n: 5.0.8
       yargs-parser: 22.0.0
 
-  yes@0.0.3:
+  yes@0.1.0:
     dependencies:
       lru-cache: 11.5.3
-      object-hash: 3.0.0
 
   yoctocolors@2.2.0: {}
 
