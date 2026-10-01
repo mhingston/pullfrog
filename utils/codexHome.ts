@@ -344,6 +344,9 @@ export function installCodexHome(): InstalledCodexHome | null {
 
 let dataHome: string | null | undefined;
 
+/** subscriptions this run held but could not install, so a no-key error can name the real cause. */
+export const unhostedSubscriptions = new Set<string>();
+
 /** false for a Codex or Grok subscription on a runner that cannot host it (`resolveDataHome`). */
 export function canInstallSubscription(name: string) {
   return (name !== CODEX_AUTH_ENV && name !== XAI_AUTH_ENV) || resolveDataHome() !== null;
@@ -399,8 +402,10 @@ function bootstrapPullfrogDataDir(): string | null {
         `runs on a model that needs the subscription will report no key.`
     );
     // harness routing and key validation read the env vars, not the installed file.
-    delete process.env[CODEX_AUTH_ENV];
-    delete process.env[XAI_AUTH_ENV];
+    for (const name of [CODEX_AUTH_ENV, XAI_AUTH_ENV]) {
+      if (process.env[name]) unhostedSubscriptions.add(name);
+      delete process.env[name];
+    }
     return null;
   }
   return PULLFROG_DATA_DIR;

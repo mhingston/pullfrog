@@ -20,6 +20,7 @@ import {
   VERTEX_MODEL_ID_ENV,
 } from "../models.ts";
 import { getApiUrl } from "./apiUrl.ts";
+import { PULLFROG_DATA_DIR, unhostedSubscriptions } from "./codexHome.ts";
 import { getModelsFailure } from "./openCodeModels.ts";
 import { PROVIDER_DASHBOARDS } from "./providerDashboards.ts";
 import {
@@ -212,10 +213,17 @@ function buildMissingApiKeyError(params: {
     ? `**${MISSING_KEY_MARKER}** — this run used \`${params.model}\`, which needs ${envVarList}, but the runner has no key for it.`
     : `**${MISSING_KEY_MARKER}** — Pullfrog needs at least one LLM provider API key (e.g. \`ANTHROPIC_API_KEY\`, \`OPENAI_API_KEY\`, \`GEMINI_API_KEY\`) configured as a GitHub Actions secret.`;
 
+  const unhosted = params.model?.includes("/")
+    ? getModelManagedCredentials(params.model).find((name) => unhostedSubscriptions.has(name))
+    : undefined;
+  const fix = unhosted
+    ? `**To fix:** your ${SUBSCRIPTION_CREDENTIALS[unhosted]?.label} is stored, but this runner has no passwordless \`sudo\`, which Pullfrog needs to keep it in \`${PULLFROG_DATA_DIR}\`, out of the agent's reach. Allow passwordless \`sudo\` for the runner user, run on a GitHub-hosted runner, or add an API key as a GitHub Actions secret or a Pullfrog secret.`
+    : "**To fix:** add the key as a GitHub Actions secret (referenced from your workflow's `env:` block) or as a Pullfrog secret in the console — or switch this repo to a different model (free models need no key).";
+
   return [
     lead,
     "",
-    "**To fix:** add the key as a GitHub Actions secret (referenced from your workflow's `env:` block) or as a Pullfrog secret in the console — or switch this repo to a different model (free models need no key).",
+    fix,
     "",
     `[Open repo secrets →](${githubSecretsUrl}) · [Configure model →](${settingsUrl}) · [Setup docs →](https://docs.pullfrog.com/keys) · [Ask in Discord →](https://discord.gg/8y96raFg8e)`,
   ].join("\n");
