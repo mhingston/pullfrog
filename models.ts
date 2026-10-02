@@ -812,6 +812,17 @@ export const providers = {
         // see the big-pickle note above (#1077).
         isFree: true,
       },
+      // Zen's FREE stealth preview (listed 2026-10-01), the fifth promo. Zen
+      // has not published its data terms yet, so the description claims none.
+      "fledge-alpha": {
+        displayName: "Fledge Alpha",
+        description: "Stealth preview, free for a limited time",
+        resolve: "opencode/fledge-alpha-free",
+        effort: ["low", "high", "max"],
+        // free to run, still gated on the provider's own OPENCODE_API_KEY —
+        // see the big-pickle note above (#1077).
+        isFree: true,
+      },
       // Zen's live free MiMo, and the second free row in a menu that big-pickle
       // was alone in since `mimo-v2-pro-free` lost its model.
       mimo: {
