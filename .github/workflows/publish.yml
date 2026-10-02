@@ -201,6 +201,13 @@ jobs:
             echo "🏷️ created ${{ steps.version.outputs.tag }}"
           fi
 
+          # a re-run after a late approval must not drag the major tag back: when two staged
+          # versions are approved together, only the one npm calls `latest` may own it.
+          latest="$(curl -sf https://registry.npmjs.org/-/package/pullfrog/dist-tags | jq -r .latest)"
+          if [ "$latest" != "${{ steps.version.outputs.version }}" ]; then
+            echo "🏷️ npm latest is $latest, so ${{ steps.version.outputs.major_tag }} stays where it is"
+            exit 0
+          fi
           git tag -f ${{ steps.version.outputs.major_tag }}
           git push origin ${{ steps.version.outputs.major_tag }} --force
           echo "🏷️ moved ${{ steps.version.outputs.major_tag }} to ${{ steps.version.outputs.version }}"
