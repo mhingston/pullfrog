@@ -822,9 +822,6 @@ export const providers = {
         // free to run, still gated on the provider's own OPENCODE_API_KEY —
         // see the big-pickle note above (#1077).
         isFree: true,
-        // out of the pickers until a published `pullfrog` resolves the slug
-        // (0.1.95 carries it); see "A new alias reaches the picker at merge".
-        hidden: true,
       },
       // Zen's live free MiMo, and the second free row in a menu that big-pickle
       // was alone in since `mimo-v2-pro-free` lost its model.
@@ -1344,7 +1341,7 @@ export const providers = {
       "deepseek-pro": {
         displayName: "DeepSeek Pro",
         resolve: "vercel/deepseek/deepseek-v4-pro-0813",
-        effort: ["none", "high", "max"],
+        effort: ["none", "low", "high", "max"],
       },
       // the gateway's bare `deepseek-v4-flash` is the April preview — the same
       // fork trap as OpenRouter, with `deepseek-v4-flash-0731` beside it — so
@@ -1352,7 +1349,7 @@ export const providers = {
       "deepseek-flash": {
         displayName: "DeepSeek Flash",
         resolve: "vercel/deepseek/deepseek-v4.1-flash",
-        effort: ["none", "high", "max"],
+        effort: ["none", "low", "high", "max"],
       },
       glm: {
         displayName: "GLM",
