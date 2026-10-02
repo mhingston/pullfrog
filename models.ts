@@ -822,6 +822,9 @@ export const providers = {
         // free to run, still gated on the provider's own OPENCODE_API_KEY —
         // see the big-pickle note above (#1077).
         isFree: true,
+        // out of the pickers until a published `pullfrog` resolves the slug
+        // (0.1.95 carries it); see "A new alias reaches the picker at merge".
+        hidden: true,
       },
       // Zen's live free MiMo, and the second free row in a menu that big-pickle
       // was alone in since `mimo-v2-pro-free` lost its model.
