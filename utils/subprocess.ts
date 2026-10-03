@@ -48,6 +48,11 @@ export function untrackChild(child: ChildProcess): void {
   activeChildren.delete(child);
 }
 
+// whether a child is still ours to reap: false once untracked or killed by `killTrackedChildren`
+export function isTrackedChild(child: ChildProcess): boolean {
+  return activeChildren.has(child);
+}
+
 // allow callers to override default signal handling
 export function setSignalHandler(handler: SignalHandler | null): void {
   externalSignalHandler = handler;
@@ -68,6 +73,7 @@ export function killTrackedChildren() {
     }
     child.kill("SIGKILL");
   }
+  activeChildren.clear();
 }
 
 // install signal handlers once (call early in process lifecycle)

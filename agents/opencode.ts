@@ -51,6 +51,7 @@
  */
 import { type ChildProcess, spawn as nodeSpawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { totalmem } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
@@ -81,7 +82,7 @@ import { findProviderErrorMatch } from "../utils/providerErrors.ts";
 import { resolveRunEffort } from "../utils/runEffort.ts";
 import { saveSecretState } from "../utils/secretCommands.ts";
 import { addSkill, installBundledSkills } from "../utils/skills.ts";
-import { trackChild, untrackChild } from "../utils/subprocess.ts";
+import { isTrackedChild, trackChild, untrackChild } from "../utils/subprocess.ts";
 import type { TodoTracker } from "../utils/todoTracking.ts";
 import { getDevDependencyVersion } from "../utils/version.ts";
 import { resolveVertexOpenCodeModel } from "../utils/vertex.ts";
@@ -194,6 +195,8 @@ interface ServerHandle {
   close: () => Promise<void>;
   /** rolling tail of server stderr for diagnostics. */
   recentStderr: string[];
+  /** why the server died on its own after boot; undefined while it is up or once `close()` ran. */
+  exitCause: () => string | undefined;
 }
 
 /**
@@ -253,11 +256,15 @@ function bootOpencodeServer(params: {
   });
 
   let closed = false;
+  let exitCause: string | undefined;
   const close = async (): Promise<void> => {
     if (closed) return;
     closed = true;
     untrackChild(proc);
-    if (proc.pid && !proc.killed) {
+    // `killed` only records a signal WE sent. a server that already died has
+    // fired its `close` event, and waiting for it again hangs the run until
+    // the outer watchdog kills it.
+    if (proc.pid && proc.exitCode === null && proc.signalCode === null) {
       try {
         process.kill(-proc.pid, "SIGTERM");
       } catch {
@@ -295,7 +302,7 @@ function bootOpencodeServer(params: {
         if (match?.[1]) {
           resolved = true;
           log.info(`» opencode server up: ${match[1]}`);
-          resolve({ baseUrl: match[1], proc, close, recentStderr });
+          resolve({ baseUrl: match[1], proc, close, recentStderr, exitCause: () => exitCause });
           // keep draining for debug visibility after handover.
         }
       }
@@ -315,6 +322,12 @@ function bootOpencodeServer(params: {
       if (!resolved) {
         reject(new Error(`failed to spawn opencode serve: ${err.message}`));
       }
+    });
+    proc.once("exit", (code, signal) => {
+      // untracked means we killed it: `close()`, or `killTrackedChildren()` on a timeout or cancel.
+      if (!resolved || !isTrackedChild(proc)) return;
+      exitCause = describeServerExit(code, signal);
+      log.warning(withServerStderr(`» ${exitCause}`, recentStderr));
     });
     proc.once("close", (code, signal) => {
       if (!resolved) {
@@ -354,6 +367,19 @@ function bootOpencodeServer(params: {
 function withServerStderr(message: string, recentStderr: readonly string[]): string {
   const tail = recentStderr.join("\n").trim();
   return tail ? `${message}\nopencode server stderr:\n${tail}` : message;
+}
+
+/**
+ * Name why the server died under a live run. Our own kills untrack it first, so
+ * a SIGKILL arriving here is almost always the kernel's OOM killer, and the
+ * memory the job may use is what the customer needs to act on it.
+ */
+function describeServerExit(code: number | null, signal: NodeJS.Signals | null): string {
+  if (signal !== "SIGKILL") return `opencode server exited mid-run (${signal ?? `code ${code}`})`;
+  // a cgroup limit (k8s, ARC) is what the OOM killer enforces; with none it reads 0 or UINT64_MAX.
+  const limit = process.constrainedMemory();
+  const memoryGb = ((limit > 0 ? Math.min(limit, totalmem()) : totalmem()) / 1024 ** 3).toFixed(1);
+  return `opencode server was killed (SIGKILL) mid-run, usually by the kernel OOM killer — this runner has ${memoryGb} GB of memory`;
 }
 
 // ── per-turn state ─────────────────────────────────────────────────────────────
@@ -435,6 +461,7 @@ interface RunnerContext {
   mcpToolCalls: number;
   /** rolling stderr tail from the server process (for diagnostics). */
   recentStderr: string[];
+  serverExitCause: ServerHandle["exitCause"];
   diagnostic: AgentDiagnostic;
 }
 
@@ -856,9 +883,9 @@ async function runPromptTurn(
   // reported as "the model went silent" — the stderr subscriber knew the
   // cause seconds after session.create, and the claude harness already names
   // it on its own timeout path. see #1183.
-  const diagnosis = ctx.diagnostic.lastProviderError
-    ? ` — likely cause: ${ctx.diagnostic.lastProviderError}`
-    : "";
+  // a dead server outranks a provider error: it is why every later request failed.
+  const cause = ctx.serverExitCause() ?? ctx.diagnostic.lastProviderError;
+  const diagnosis = cause ? ` — likely cause: ${cause}` : "";
 
   if (networkError) {
     // a watchdog-fired abort surfaces here as a caught `session.prompt`
@@ -1404,6 +1431,7 @@ export const opencode = agent({
         loggedToolCallIDs: new Set(),
         mcpToolCalls: 0,
         recentStderr: server.recentStderr,
+        serverExitCause: server.exitCause,
         diagnostic: {
           label: "Pullfrog",
           recentStderr: server.recentStderr,
