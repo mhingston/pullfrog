@@ -423,7 +423,12 @@ export async function commitAndPushAzureDevOpsSource(params: {
   }
 
   const live = (await params.getLiveSourceCommitId())?.toLowerCase();
-  if (live && live !== expected) {
+  if (!live) {
+    throw new Error(
+      "Azure DevOps commit blocked: unable to verify the live PR source commit"
+    );
+  }
+  if (live !== expected) {
     throw new Error(
       "Azure DevOps commit blocked: PR source advanced from " +
         expected.slice(0, 12) +
@@ -512,8 +517,14 @@ export async function commitAndPushAzureDevOpsSource(params: {
     );
   }
 
+  // Use an explicit lease as a compare-and-swap guard. The commit-parent
+  // check above proves this is a fast-forward from `expected`; the lease adds
+  // the stronger requirement that the remote ref is STILL exactly `expected`
+  // at the instant the server accepts the update (including force-reset races).
+  const remoteRef = "refs/heads/" + branch;
   authenticatedGit(params.cwd, params.ctx, "push", [
-    "HEAD:refs/heads/" + branch,
+    "--force-with-lease=" + remoteRef + ":" + expected,
+    "HEAD:" + remoteRef,
   ]);
 
   return {
