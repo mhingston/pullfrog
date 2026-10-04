@@ -132,10 +132,26 @@ function reviewPrompt(params: {
     .join("\n");
 }
 
+const AZDO_AUTH_ENV = ["SYSTEM_ACCESSTOKEN", "AZURE_DEVOPS_TOKEN", "AZURE_DEVOPS_PAT"] as const;
+
+function scrubAzureDevOpsAuth(): () => void {
+  const saved = new Map<string, string>();
+  for (const name of AZDO_AUTH_ENV) {
+    const value = process.env[name];
+    if (value !== undefined) saved.set(name, value);
+    delete process.env[name];
+  }
+  return () => {
+    for (const name of AZDO_AUTH_ENV) delete process.env[name];
+    for (const [name, value] of saved) process.env[name] = value;
+  };
+}
+
 async function runReview(params: { model: string | undefined; dryRun: boolean }): Promise<void> {
   const ctx = resolveAzureDevOpsContext();
   const client = new AzureDevOpsClient(ctx);
   const pullRequest = await client.getPullRequest();
+  const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
   const model = resolveModel(params.model);
   validateModelEnvironment(model);
 
@@ -219,6 +235,7 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
         posted.threadId
     );
   } finally {
+    restoreAzureDevOpsAuth();
     if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
     else process.env.PULLFROG_TEMP_DIR = priorTempDir;
     rmSync(tempDir, { recursive: true, force: true });
