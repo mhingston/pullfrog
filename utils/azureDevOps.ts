@@ -143,7 +143,7 @@ function ensureRemoteRef(params: { cwd: string; branch: string }): string {
       "fetch",
       "--no-tags",
       "origin",
-      "refs/heads/" + params.branch + ":" + remoteRef,
+      "+" + "refs/heads/" + params.branch + ":" + remoteRef,
     ]);
     return remoteRef;
   } catch (error) {
