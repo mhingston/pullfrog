@@ -404,6 +404,11 @@ export class AzureDevOpsClient {
     if (!markdown) {
       throw new Error("Azure DevOps follow-up reply must not be empty");
     }
+    if (/<!--\s*pullfrog-azure-devops-/i.test(markdown)) {
+      throw new Error(
+        "Azure DevOps follow-up reply contains reserved Pullfrog marker syntax"
+      );
+    }
 
     const thread = await this.getThread(params.threadId);
     const trigger = (thread.comments ?? []).find(
