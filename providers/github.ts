@@ -93,7 +93,11 @@ export class GitHubPullRequestProvider implements PullRequestReviewProvider {
     const sourceSha = review.sourceSha.toLowerCase();
 
     if (liveSha !== sourceSha) {
-      return { published: false, supersededBy: liveSha };
+      return {
+        published: false,
+        consistency: "best-effort",
+        supersededBy: liveSha,
+      };
     }
 
     const result = await this.#api.pulls.createReview({
@@ -105,10 +109,19 @@ export class GitHubPullRequestProvider implements PullRequestReviewProvider {
       commit_id: sourceSha,
     });
 
+    // GitHub accepts reviews anchored to an older PR commit and does not offer
+    // a conditional "publish only if head is still X" write. Re-read after the
+    // POST so callers can distinguish a clean publication from a race we
+    // detected after the stale review already exists.
+    const after = await this.#get();
+    const afterSha = after.head.sha.toLowerCase();
+
     return {
       published: true,
       created: true,
       id: String(result.data.id),
+      consistency: "best-effort",
+      ...(afterSha !== sourceSha ? { supersededBy: afterSha } : {}),
     };
   }
 }
