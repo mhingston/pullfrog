@@ -115,6 +115,9 @@ describe.each(providerFixtures)("%s provider contract", (_name, fixture) => {
     });
 
     expect(result.publication?.published).toBe(true);
+    expect(result.publication?.consistency).toBe(
+      _name === "Azure DevOps" ? "source-convergent" : "best-effort"
+    );
     expect(published).toEqual([{ body: "review body", sourceSha }]);
   });
 
@@ -163,12 +166,13 @@ describe("provider-specific stale publication", () => {
       provider.publishReview({ body: "old", sourceSha })
     ).resolves.toEqual({
       published: false,
+      consistency: "source-convergent",
       supersededBy: newerSha,
     });
   });
 
-  it("suppresses a GitHub review when the live head moved", async () => {
-    let currentSha = sourceSha;
+  it("suppresses a GitHub review when the head already moved", async () => {
+    let currentSha = newerSha;
     const createReview = vi.fn(async () => ({ data: { id: 23 } }));
     const api: GitHubReviewApi = {
       pulls: {
@@ -194,14 +198,56 @@ describe("provider-specific stale publication", () => {
       pullNumber: 42,
     });
 
-    currentSha = newerSha;
     await expect(
       provider.publishReview({ body: "old", sourceSha })
     ).resolves.toEqual({
       published: false,
+      consistency: "best-effort",
       supersededBy: newerSha,
     });
     expect(createReview).not.toHaveBeenCalled();
+  });
+
+  it("reports when GitHub advances during publication", async () => {
+    let currentSha = sourceSha;
+    const createReview = vi.fn(async () => {
+      currentSha = newerSha;
+      return { data: { id: 23 } };
+    });
+    const api: GitHubReviewApi = {
+      pulls: {
+        async get() {
+          return {
+            data: {
+              id: 9001,
+              number: 42,
+              title: "provider boundary",
+              body: "",
+              head: { ref: "feature/provider", sha: currentSha },
+              base: { ref: "main" },
+            },
+          };
+        },
+        createReview,
+      },
+    };
+    const provider = new GitHubPullRequestProvider({
+      api,
+      owner: "acme",
+      repo: "widget",
+      pullNumber: 42,
+    });
+
+    await expect(
+      provider.publishReview({ body: "old", sourceSha })
+    ).resolves.toEqual({
+      published: true,
+      created: true,
+      id: "23",
+      consistency: "best-effort",
+      supersededBy: newerSha,
+    });
+    expect(createReview).toHaveBeenCalledTimes(1);
   });
 });
 
