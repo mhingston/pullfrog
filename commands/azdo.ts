@@ -14,7 +14,10 @@ import {
   resolveDisplayAlias,
 } from "../models.ts";
 import { azureProvider, installOpencodeCli, type OpenCodeConfig } from "../agents/opencodeShared.ts";
-import { AzureDevOpsPullRequestProvider } from "../providers/azureDevOps.ts";
+import {
+  AzureDevOpsPullRequestProvider,
+  azureDevOpsValidationEvent,
+} from "../providers/azureDevOps.ts";
 import { runPullRequestReview } from "../providers/review.ts";
 import {
   buildAzureDevOpsPullRequestDiff,
@@ -178,6 +181,7 @@ function scrubAzureDevOpsAuth(): () => void {
 
 async function runReview(params: { model: string | undefined; dryRun: boolean }): Promise<void> {
   const ctx = resolveAzureDevOpsContext();
+  const event = azureDevOpsValidationEvent(ctx);
   const provider = new AzureDevOpsPullRequestProvider(ctx);
 
   // The provider captures the Azure authorization in its private client before
@@ -197,7 +201,7 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
         const diff = buildAzureDevOpsPullRequestDiff({
           cwd,
           sourceBranch: ctx.sourceBranch,
-          sourceCommitId: pullRequest.source.sha,
+          sourceCommitId: event.sourceSha,
           targetBranch: ctx.targetBranch,
         });
 
