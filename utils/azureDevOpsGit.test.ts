@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  azureDevOpsSourcePushArgs,
   commitAndPushAzureDevOpsSource,
   parseAzureDevOpsPushPermission,
   prepareAzureDevOpsSourceCheckout,
@@ -56,6 +57,16 @@ describe("Azure DevOps push permission", () => {
     expect(() => parseAzureDevOpsPushPermission("force")).toThrow(
       "disabled, restricted, or enabled"
     );
+  });
+});
+
+describe("Azure DevOps source push lease", () => {
+  it("pins the remote ref to the validated source SHA", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    expect(azureDevOpsSourcePushArgs("feature/write", sha)).toEqual([
+      "--force-with-lease=refs/heads/feature/write:" + sha,
+      "HEAD:refs/heads/feature/write",
+    ]);
   });
 });
 
