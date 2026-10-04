@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 
 export const AZDO_REVIEW_MARKER_PREFIX = "<!-- pullfrog-azure-devops-review:";
 export const AZDO_FINDING_MARKER_PREFIX = "<!-- pullfrog-azure-devops-finding:";
+export const AZDO_FOLLOWUP_MARKER_PREFIX = "<!-- pullfrog-azure-devops-followup:";
 export const AZDO_STATUS_GENRE = "pullfrog";
 export const AZDO_STATUS_NAME = "review";
 
@@ -31,20 +32,27 @@ export function azureDevOpsFindingMarker(
   );
 }
 
-export interface AzureDevOpsContext {
+export interface AzureDevOpsRepositoryContext {
   collectionUri: string;
   project: string;
   repositoryId: string;
   repositoryUri: string;
   defaultBranch: string;
+  authorization: string;
+}
+
+export interface AzureDevOpsContext extends AzureDevOpsRepositoryContext {
   pullRequestId: number;
   sourceBranch: string;
   sourceCommitId: string;
   targetBranch: string;
-  authorization: string;
 }
 
-interface AzureDevOpsPullRequest {
+export type AzureDevOpsClientContext = AzureDevOpsRepositoryContext & {
+  pullRequestId: number;
+};
+
+export interface AzureDevOpsPullRequest {
   pullRequestId: number;
   title: string;
   description?: string | null;
@@ -55,13 +63,23 @@ interface AzureDevOpsPullRequest {
   url?: string | undefined;
 }
 
-interface AzureDevOpsComment {
-  id: number;
-  content?: string | null;
-  isDeleted?: boolean | undefined;
+export interface AzureDevOpsIdentity {
+  id?: string | undefined;
+  displayName?: string | undefined;
+  uniqueName?: string | undefined;
 }
 
-interface AzureDevOpsThread {
+export interface AzureDevOpsComment {
+  id: number;
+  parentCommentId?: number | undefined;
+  content?: string | null;
+  isDeleted?: boolean | undefined;
+  commentType?: number | string | undefined;
+  author?: AzureDevOpsIdentity | undefined;
+  publishedDate?: string | undefined;
+}
+
+export interface AzureDevOpsThread {
   id: number;
   comments?: AzureDevOpsComment[] | undefined;
   isDeleted?: boolean | undefined;
@@ -149,9 +167,9 @@ export function buildAzureDevOpsAuthorization(env: NodeJS.ProcessEnv): string {
   );
 }
 
-export function resolveAzureDevOpsContext(
+export function resolveAzureDevOpsRepositoryContext(
   env: NodeJS.ProcessEnv = process.env
-): AzureDevOpsContext {
+): AzureDevOpsRepositoryContext {
   const collectionUri = required(
     "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
     env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI || env.SYSTEM_COLLECTIONURI
@@ -165,10 +183,24 @@ export function resolveAzureDevOpsContext(
   const repositoryProvider = env.BUILD_REPOSITORY_PROVIDER?.trim();
   if (repositoryProvider && repositoryProvider !== "TfsGit") {
     throw new Error(
-      "pullfrog azdo review currently supports Azure Repos Git only; BUILD_REPOSITORY_PROVIDER=" +
+      "pullfrog azdo currently supports Azure Repos Git only; BUILD_REPOSITORY_PROVIDER=" +
         repositoryProvider
     );
   }
+  return {
+    collectionUri,
+    project,
+    repositoryId,
+    repositoryUri,
+    defaultBranch,
+    authorization: buildAzureDevOpsAuthorization(env),
+  };
+}
+
+export function resolveAzureDevOpsContext(
+  env: NodeJS.ProcessEnv = process.env
+): AzureDevOpsContext {
+  const repository = resolveAzureDevOpsRepositoryContext(env);
   const pullRequestId = positiveInteger(
     "SYSTEM_PULLREQUEST_PULLREQUESTID",
     env.SYSTEM_PULLREQUEST_PULLREQUESTID
@@ -190,16 +222,11 @@ export function resolveAzureDevOpsContext(
   );
 
   return {
-    collectionUri,
-    project,
-    repositoryId,
-    repositoryUri,
-    defaultBranch,
+    ...repository,
     pullRequestId,
     sourceBranch,
     sourceCommitId,
     targetBranch,
-    authorization: buildAzureDevOpsAuthorization(env),
   };
 }
 
@@ -307,9 +334,9 @@ export function buildAzureDevOpsPullRequestDiff(params: {
 }
 
 export class AzureDevOpsClient {
-  readonly #ctx: AzureDevOpsContext;
+  readonly #ctx: AzureDevOpsClientContext;
 
-  constructor(ctx: AzureDevOpsContext) {
+  constructor(ctx: AzureDevOpsClientContext) {
     this.#ctx = ctx;
   }
 
@@ -346,11 +373,163 @@ export class AzureDevOpsClient {
       );
     }
 
-    return (await response.json()) as T;
+    const text = await response.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
   }
 
   async getPullRequest(): Promise<AzureDevOpsPullRequest> {
     return await this.#request<AzureDevOpsPullRequest>("?api-version=7.1");
+  }
+
+  async getThread(threadId: number): Promise<AzureDevOpsThread> {
+    if (!Number.isInteger(threadId) || threadId <= 0) {
+      throw new Error("Azure DevOps thread id must be a positive integer");
+    }
+    return await this.#request<AzureDevOpsThread>(
+      "/threads/" + threadId + "?api-version=7.1"
+    );
+  }
+
+  #followUpMarker(threadId: number, triggerCommentId: number): string {
+    return (
+      AZDO_FOLLOWUP_MARKER_PREFIX +
+      threadId +
+      ":" +
+      triggerCommentId +
+      " -->"
+    );
+  }
+
+  #followUpComments(
+    thread: AzureDevOpsThread,
+    marker: string
+  ): AzureDevOpsComment[] {
+    return (thread.comments ?? [])
+      .filter(
+        (comment) =>
+          !comment.isDeleted &&
+          typeof comment.content === "string" &&
+          comment.content.includes(marker)
+      )
+      .sort((a, b) => a.id - b.id);
+  }
+
+  async #deleteDuplicateFollowUpComments(
+    threadId: number,
+    comments: AzureDevOpsComment[]
+  ): Promise<void> {
+    for (const duplicate of comments.slice(1)) {
+      try {
+        await this.#request<void>(
+          "/threads/" +
+            threadId +
+            "/comments/" +
+            duplicate.id +
+            "?api-version=7.1",
+          { method: "DELETE" }
+        );
+      } catch (error) {
+        // Another concurrent retry may have deleted the same duplicate after
+        // our re-list. Missing is already the converged state.
+        if (
+          !(error instanceof Error) ||
+          !/^Azure DevOps API failed: 404\b/.test(error.message)
+        ) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  async reconcileThreadFollowUp(params: {
+    threadId: number;
+    triggerCommentId: number;
+    resolve?: boolean | undefined;
+  }): Promise<{ commentId: number } | undefined> {
+    if (!Number.isInteger(params.triggerCommentId) || params.triggerCommentId <= 0) {
+      throw new Error("Azure DevOps trigger comment id must be a positive integer");
+    }
+
+    const thread = await this.getThread(params.threadId);
+    const trigger = (thread.comments ?? []).find(
+      (comment) => comment.id === params.triggerCommentId && !comment.isDeleted
+    );
+    if (!trigger) {
+      throw new Error(
+        "Azure DevOps trigger comment " +
+          params.triggerCommentId +
+          " does not exist in thread " +
+          params.threadId
+      );
+    }
+
+    const marker = this.#followUpMarker(
+      params.threadId,
+      params.triggerCommentId
+    );
+    const existing = this.#followUpComments(thread, marker);
+    const canonical = existing[0];
+    if (!canonical) return undefined;
+
+    // Retry is a convergence path too: if an earlier overlapping run crashed
+    // after POST, clean up any marker-bearing duplicates before returning.
+    await this.#deleteDuplicateFollowUpComments(params.threadId, existing);
+    if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
+
+    return { commentId: canonical.id };
+  }
+
+  async replyToThreadFollowUp(params: {
+    threadId: number;
+    triggerCommentId: number;
+    markdown: string;
+    resolve?: boolean | undefined;
+  }): Promise<{ created: boolean; commentId: number }> {
+    const markdown = params.markdown.trim();
+    if (!markdown) {
+      throw new Error("Azure DevOps follow-up reply must not be empty");
+    }
+    if (/<!--\s*pullfrog-azure-devops-/i.test(markdown)) {
+      throw new Error(
+        "Azure DevOps follow-up reply contains reserved Pullfrog marker syntax"
+      );
+    }
+
+    const reconciled = await this.reconcileThreadFollowUp({
+      threadId: params.threadId,
+      triggerCommentId: params.triggerCommentId,
+      resolve: params.resolve,
+    });
+    if (reconciled) {
+      return { created: false, commentId: reconciled.commentId };
+    }
+
+    const marker = this.#followUpMarker(
+      params.threadId,
+      params.triggerCommentId
+    );
+    const posted = await this.#request<AzureDevOpsComment>(
+      "/threads/" + params.threadId + "/comments?api-version=7.1",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          parentCommentId: params.triggerCommentId,
+          content: markdown + "\n\n" + marker,
+          commentType: 1,
+        }),
+      }
+    );
+
+    // POST is not conditional. Converge overlapping retries by keeping the
+    // lowest marker-bearing comment ID and deleting later duplicates.
+    const after = await this.getThread(params.threadId);
+    const matching = this.#followUpComments(after, marker);
+    const canonical = matching[0] ?? posted;
+    await this.#deleteDuplicateFollowUpComments(params.threadId, matching);
+
+    if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
+    return { created: canonical.id === posted.id, commentId: canonical.id };
   }
 
   async #listIterations(): Promise<AzureDevOpsIteration[]> {

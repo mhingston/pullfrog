@@ -23,12 +23,18 @@ import {
   AzureDevOpsClient,
   buildAzureDevOpsPullRequestDiff,
   resolveAzureDevOpsContext,
+  resolveAzureDevOpsRepositoryContext,
+  stripRefsHeads,
 } from "../utils/azureDevOps.ts";
 import {
   commitAndPushAzureDevOpsSource,
   parseAzureDevOpsPushPermission,
   prepareAzureDevOpsSourceCheckout,
 } from "../utils/azureDevOpsGit.ts";
+import {
+  buildAzureFollowUpPrompt,
+  selectAzureFollowUp,
+} from "./azdoFollowUp.ts";
 import {
   azureInlineFindings,
   azureReviewStatus,
@@ -50,12 +56,17 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("");
   params.stream("commands:");
   params.stream("  review       review the current Azure Repos pull request");
+  params.stream("  follow-up    answer one explicit PR thread follow-up");
   params.stream("  checkout     prepare the validated PR source branch for code-writing work");
   params.stream("  commit       commit and push current working-tree changes to the PR source branch");
   params.stream("");
-  params.stream("review options:");
+  params.stream("review/follow-up options:");
   params.stream("  -m, --model <provider/model>  OpenCode model (defaults to PULLFROG_MODEL or azure/$AZURE_DEPLOYMENT)");
-  params.stream("      --dry-run                 print the review instead of posting it");
+  params.stream("      --dry-run                 print output instead of posting it");
+  params.stream("      --pull-request <id>       PR id (required for follow-up)");
+  params.stream("      --thread <id>             thread id (required for follow-up)");
+  params.stream("      --comment <id>            triggering comment id (required for follow-up)");
+  params.stream("      --resolve                 resolve the thread after posting the reply");
   params.stream("");
   params.stream("write options:");
   params.stream("      --push <mode>             disabled, restricted, or enabled (default: PULLFROG_PUSH or restricted)");
@@ -420,6 +431,162 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
   }
 }
 
+function requireCliPositiveInteger(name: string, value: string | undefined): number {
+  const parsed = Number(value);
+  if (!value?.trim() || !Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(name + " must be a positive integer");
+  }
+  return parsed;
+}
+
+async function runFollowUp(params: {
+  model: string | undefined;
+  pullRequest: string | undefined;
+  thread: string | undefined;
+  comment: string | undefined;
+  resolve: boolean;
+  dryRun: boolean;
+}): Promise<void> {
+  const repository = resolveAzureDevOpsRepositoryContext();
+  const pullRequestId = requireCliPositiveInteger("--pull-request", params.pullRequest);
+  const threadId = requireCliPositiveInteger("--thread", params.thread);
+  const commentId = requireCliPositiveInteger("--comment", params.comment);
+  const client = new AzureDevOpsClient({ ...repository, pullRequestId });
+
+  const pullRequest = await client.getPullRequest();
+  const thread = await client.getThread(threadId);
+  const selection = selectAzureFollowUp({ thread, commentId });
+
+  if (selection.kind === "ignored") {
+    console.log("skipping Azure DevOps follow-up: " + selection.reason);
+    return;
+  }
+  if (selection.kind === "already-handled") {
+    const reconciled = await client.reconcileThreadFollowUp({
+      threadId,
+      triggerCommentId: commentId,
+      resolve: params.resolve,
+    });
+    if (!reconciled) {
+      console.log(
+        "Azure DevOps follow-up marker disappeared before reconciliation; rerun the command"
+      );
+      return;
+    }
+    console.log(
+      "Azure DevOps follow-up already handled by comment " +
+        reconciled.commentId +
+        (params.resolve ? "; thread resolved" : "")
+    );
+    return;
+  }
+
+  const sourceSha = pullRequest.lastMergeSourceCommit?.commitId?.trim().toLowerCase();
+  if (!sourceSha || !/^[0-9a-f]{40}$/.test(sourceSha)) {
+    throw new Error("Azure DevOps pull request is missing a valid source commit");
+  }
+  const sourceBranch = stripRefsHeads(pullRequest.sourceRefName);
+  const targetBranch = stripRefsHeads(pullRequest.targetRefName);
+  const diff = buildAzureDevOpsPullRequestDiff({
+    cwd: process.cwd(),
+    sourceBranch,
+    sourceCommitId: sourceSha,
+    targetBranch,
+  });
+
+  // Capture REST authorization in the client, then remove all Azure DevOps
+  // credentials before the model subprocess is created.
+  const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
+  try {
+    const model = resolveModel(params.model);
+    validateModelEnvironment(model);
+
+    const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-followup-"));
+    const priorTempDir = process.env.PULLFROG_TEMP_DIR;
+    process.env.PULLFROG_TEMP_DIR = tempDir;
+
+    try {
+      const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
+      const input = buildAzureFollowUpPrompt({
+        title: pullRequest.title,
+        description: pullRequest.description ?? "",
+        sourceBranch,
+        targetBranch,
+        sourceSha,
+        trigger: selection.trigger,
+        diff: diff.diff,
+        truncatedDiff: diff.truncated,
+      });
+
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: tempDir,
+        PWD: tempDir,
+        XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
+        XDG_DATA_HOME: join(tempDir, "xdg-data"),
+        OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
+        OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
+        OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+        OPENCODE_PURE: "true",
+        OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+        OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+        OPENCODE_DISABLE_CLAUDE_CODE: "true",
+        OPENCODE_EXPERIMENTAL: "false",
+        OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
+      };
+      delete childEnv.OPENCODE_CONFIG;
+      delete childEnv.OPENCODE_CONFIG_DIR;
+      delete childEnv.OPENCODE_TUI_CONFIG;
+
+      const child = spawnSync(cliPath, ["run", "--model", model, "--dir", tempDir], {
+        cwd: tempDir,
+        input,
+        encoding: "utf-8",
+        maxBuffer: 16 * 1024 * 1024,
+        env: childEnv,
+      });
+      if (child.error) throw child.error;
+      if (child.status !== 0) {
+        const details = stripAnsi(child.stderr || child.stdout || "");
+        throw new Error(
+          "OpenCode follow-up failed with exit " +
+            child.status +
+            (details ? ": " + details.slice(-4000) : "")
+        );
+      }
+
+      const answer = boundedReviewOutput(stripAnsi(child.stdout || ""), 30_000);
+      if (!answer) throw new Error("OpenCode returned an empty Azure DevOps follow-up");
+
+      if (params.dryRun) {
+        console.log(answer);
+        return;
+      }
+
+      const publication = await client.replyToThreadFollowUp({
+        threadId,
+        triggerCommentId: commentId,
+        markdown: answer,
+        resolve: params.resolve,
+      });
+      console.log(
+        (publication.created ? "created" : "reused") +
+          " Azure DevOps follow-up comment " +
+          publication.commentId +
+          " in thread " +
+          threadId +
+          (params.resolve ? " and resolved the thread" : "")
+      );
+    } finally {
+      if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
+      else process.env.PULLFROG_TEMP_DIR = priorTempDir;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  } finally {
+    restoreAzureDevOpsAuth();
+  }
+}
+
 async function runCheckout(params: { push: string | undefined }): Promise<void> {
   const ctx = resolveAzureDevOpsContext();
   const permission = parseAzureDevOpsPushPermission(
@@ -492,6 +659,10 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       "--dry-run": Boolean,
       "--push": String,
       "--message": String,
+      "--pull-request": String,
+      "--thread": String,
+      "--comment": String,
+      "--resolve": Boolean,
       "-h": "--help",
       "-m": "--model",
     },
@@ -512,6 +683,18 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
   if (subcommand === "review") {
     await runReview({
       model: parsed["--model"],
+      dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  if (subcommand === "follow-up") {
+    await runFollowUp({
+      model: parsed["--model"],
+      pullRequest: parsed["--pull-request"],
+      thread: parsed["--thread"],
+      comment: parsed["--comment"],
+      resolve: parsed["--resolve"] === true,
       dryRun: parsed["--dry-run"] === true,
     });
     return;
