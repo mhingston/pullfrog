@@ -397,7 +397,27 @@ export class AzureDevOpsClient {
     markdown: string;
     resolve?: boolean | undefined;
   }): Promise<{ created: boolean; commentId: number }> {
+    if (!Number.isInteger(params.triggerCommentId) || params.triggerCommentId <= 0) {
+      throw new Error("Azure DevOps trigger comment id must be a positive integer");
+    }
+    const markdown = params.markdown.trim();
+    if (!markdown) {
+      throw new Error("Azure DevOps follow-up reply must not be empty");
+    }
+
     const thread = await this.getThread(params.threadId);
+    const trigger = (thread.comments ?? []).find(
+      (comment) => comment.id === params.triggerCommentId && !comment.isDeleted
+    );
+    if (!trigger) {
+      throw new Error(
+        "Azure DevOps trigger comment " +
+          params.triggerCommentId +
+          " does not exist in thread " +
+          params.threadId
+      );
+    }
+
     const marker =
       AZDO_FOLLOWUP_MARKER_PREFIX +
       params.threadId +
@@ -424,7 +444,7 @@ export class AzureDevOpsClient {
         method: "POST",
         body: JSON.stringify({
           parentCommentId: params.triggerCommentId,
-          content: params.markdown.trim() + "\n\n" + marker,
+          content: markdown + "\n\n" + marker,
           commentType: 1,
         }),
       }
@@ -443,14 +463,25 @@ export class AzureDevOpsClient {
       .sort((a, b) => a.id - b.id);
     const canonical = matching[0] ?? posted;
     for (const duplicate of matching.slice(1)) {
-      await this.#request<void>(
-        "/threads/" +
-          params.threadId +
-          "/comments/" +
-          duplicate.id +
-          "?api-version=7.1",
-        { method: "DELETE" }
-      );
+      try {
+        await this.#request<void>(
+          "/threads/" +
+            params.threadId +
+            "/comments/" +
+            duplicate.id +
+            "?api-version=7.1",
+          { method: "DELETE" }
+        );
+      } catch (error) {
+        // Another concurrent retry may have deleted the same duplicate after
+        // our re-list. Missing is already the converged state.
+        if (
+          !(error instanceof Error) ||
+          !/^Azure DevOps API failed: 404\b/.test(error.message)
+        ) {
+          throw error;
+        }
+      }
     }
 
     if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
