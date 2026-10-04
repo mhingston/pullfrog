@@ -86,10 +86,18 @@ function githubFixture(): {
   };
 }
 
-describe.each([
+const providerFixtures: Array<[
+  string,
+  () => {
+    provider: PullRequestReviewProvider;
+    published: Array<{ body: string; sourceSha: string }>;
+  },
+]> = [
   ["Azure DevOps", azureFixture],
   ["GitHub", githubFixture],
-])("%s provider contract", (_name, fixture) => {
+];
+
+describe.each(providerFixtures)("%s provider contract", (_name, fixture) => {
   it("normalizes PR identity and publishes against the reviewed source SHA", async () => {
     const { provider, published } = fixture();
     const result = await runPullRequestReview({
