@@ -38,6 +38,7 @@ function context(sha: string): AzureDevOpsGitContext {
   return {
     collectionUri: "https://dev.azure.com/acme/",
     repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+    defaultBranch: "main",
     sourceBranch: "feature/write",
     sourceCommitId: sha,
     targetBranch: "main",
@@ -168,6 +169,25 @@ describe("Azure DevOps stale write guards", () => {
           getLiveSourceCommitId: async () => sha,
         })
       ).rejects.toThrow("Pullfrog owns the commit step");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks writes from the repository default branch even when it targets another branch", () => {
+    const { root, sha } = makeRepo();
+    try {
+      expect(() =>
+        prepareAzureDevOpsSourceCheckout({
+          cwd: root,
+          ctx: {
+            ...context(sha),
+            sourceBranch: "main",
+            targetBranch: "release/2026",
+          },
+          permission: "enabled",
+        })
+      ).toThrow("repository default branch main");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
