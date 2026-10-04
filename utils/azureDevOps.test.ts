@@ -15,9 +15,10 @@ const baseEnv = {
   SYSTEM_TEAMFOUNDATIONCOLLECTIONURI: "https://dev.azure.com/acme",
   SYSTEM_TEAMPROJECT: "Platform",
   BUILD_REPOSITORY_ID: "repo-guid",
+  BUILD_REPOSITORY_PROVIDER: "TfsGit",
   SYSTEM_PULLREQUEST_PULLREQUESTID: "42",
   SYSTEM_PULLREQUEST_SOURCEBRANCH: "refs/heads/feature/azdo",
-  SYSTEM_PULLREQUEST_SOURCECOMMITID: "0123456789abcdef",
+  SYSTEM_PULLREQUEST_SOURCECOMMITID: "0123456789abcdef0123456789abcdef01234567",
   SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
   SYSTEM_ACCESSTOKEN: "job-token",
 } satisfies NodeJS.ProcessEnv;
@@ -30,7 +31,7 @@ describe("Azure DevOps context", () => {
       repositoryId: "repo-guid",
       pullRequestId: 42,
       sourceBranch: "feature/azdo",
-      sourceCommitId: "0123456789abcdef",
+      sourceCommitId: "0123456789abcdef0123456789abcdef01234567",
       targetBranch: "main",
       authorization: "Bearer job-token",
     });
@@ -56,6 +57,16 @@ describe("Azure DevOps context", () => {
   it("strips only refs/heads", () => {
     expect(stripRefsHeads("refs/heads/users/mark/feature")).toBe("users/mark/feature");
     expect(stripRefsHeads("main")).toBe("main");
+  });
+
+
+  it("rejects non-Azure-Repos providers", () => {
+    expect(() =>
+      resolveAzureDevOpsContext({
+        ...baseEnv,
+        BUILD_REPOSITORY_PROVIDER: "GitHub",
+      })
+    ).toThrow("Azure Repos Git only");
   });
 
   it("fails clearly outside a PR validation build", () => {
