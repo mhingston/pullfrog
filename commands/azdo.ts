@@ -10,6 +10,8 @@ import {
   AZURE_MAX_OUTPUT_ENV,
   AZURE_PROVIDER,
   AZURE_RESOURCE_NAME_ENV,
+  resolveCliModel,
+  resolveDisplayAlias,
 } from "../models.ts";
 import { azureProvider, installOpencodeCli, type OpenCodeConfig } from "../agents/opencodeShared.ts";
 import {
@@ -56,7 +58,26 @@ function validateModelEnvironment(model: string): void {
 
 function resolveModel(explicit: string | undefined): string {
   const configured = explicit?.trim() || process.env.PULLFROG_MODEL?.trim();
-  if (configured) return configured;
+  if (configured) {
+    const alias = resolveDisplayAlias(configured);
+    if (alias?.routing === "azure") {
+      const deployment = process.env[AZURE_DEPLOYMENT_ENV]?.trim();
+      if (!deployment) {
+        throw new Error(
+          AZURE_DEPLOYMENT_ENV + " is required when " + configured + " selects Azure routing"
+        );
+      }
+      return AZURE_PROVIDER + "/" + deployment;
+    }
+    if (alias?.routing) {
+      throw new Error(
+        "Azure DevOps review does not yet support the " +
+          alias.routing +
+          " Pullfrog routing alias. Pass a concrete OpenCode provider/model instead."
+      );
+    }
+    return resolveCliModel(configured) ?? configured;
+  }
 
   const deployment = process.env[AZURE_DEPLOYMENT_ENV]?.trim();
   if (deployment) return AZURE_PROVIDER + "/" + deployment;
