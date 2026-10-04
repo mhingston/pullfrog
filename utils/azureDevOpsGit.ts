@@ -183,6 +183,19 @@ function authenticatedGit(
   delete env.SYSTEM_ACCESSTOKEN;
   delete env.AZURE_DEVOPS_TOKEN;
   delete env.AZURE_DEVOPS_PAT;
+  // Do not inherit transport/auth hooks from the outer runner. Authenticated
+  // git is parent-owned and deliberately non-extensible while the token-backed
+  // header is live.
+  for (const name of [
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
+    "GIT_EXEC_PATH",
+  ]) {
+    delete env[name];
+  }
 
   const fullArgs = [
     "-c",
