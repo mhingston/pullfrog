@@ -25,6 +25,11 @@ import {
   resolveAzureDevOpsContext,
 } from "../utils/azureDevOps.ts";
 import {
+  commitAndPushAzureDevOpsSource,
+  parseAzureDevOpsPushPermission,
+  prepareAzureDevOpsSourceCheckout,
+} from "../utils/azureDevOpsGit.ts";
+import {
   azureInlineFindings,
   azureReviewStatus,
   parseAzureStructuredReview,
@@ -40,12 +45,23 @@ interface AzdoCliParams {
 }
 
 function printUsage(params: { stream: typeof console.log; prog: string }): void {
-  params.stream("usage: " + params.prog + " azdo review [options]\n");
-  params.stream("review the current Azure Repos pull request from an Azure Pipelines job.");
+  params.stream("usage: " + params.prog + " azdo <command> [options]\n");
+  params.stream("Azure Repos / Azure Pipelines commands:");
   params.stream("");
-  params.stream("options:");
+  params.stream("commands:");
+  params.stream("  review       review the current Azure Repos pull request");
+  params.stream("  checkout     prepare the validated PR source branch for code-writing work");
+  params.stream("  commit       commit and push current working-tree changes to the PR source branch");
+  params.stream("");
+  params.stream("review options:");
   params.stream("  -m, --model <provider/model>  OpenCode model (defaults to PULLFROG_MODEL or azure/$AZURE_DEPLOYMENT)");
   params.stream("      --dry-run                 print the review instead of posting it");
+  params.stream("");
+  params.stream("write options:");
+  params.stream("      --push <mode>             disabled, restricted, or enabled (default: PULLFROG_PUSH or restricted)");
+  params.stream("      --message <text>          commit message (required for commit)");
+  params.stream("      --dry-run                 validate commit/push without writing");
+  params.stream("");
   params.stream("  -h, --help                    show help");
 }
 
@@ -404,12 +420,78 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
   }
 }
 
+async function runCheckout(params: { push: string | undefined }): Promise<void> {
+  const ctx = resolveAzureDevOpsContext();
+  const permission = parseAzureDevOpsPushPermission(
+    params.push ?? process.env.PULLFROG_PUSH
+  );
+  const prepared = prepareAzureDevOpsSourceCheckout({
+    cwd: process.cwd(),
+    ctx,
+    permission,
+  });
+  console.log(
+    "prepared Azure DevOps PR source " +
+      prepared.branch +
+      " at " +
+      prepared.sha.slice(0, 12) +
+      "; persisted git credentials removed"
+  );
+}
+
+async function runCommit(params: {
+  push: string | undefined;
+  message: string | undefined;
+  dryRun: boolean;
+}): Promise<void> {
+  const ctx = resolveAzureDevOpsContext();
+  const permission = parseAzureDevOpsPushPermission(
+    params.push ?? process.env.PULLFROG_PUSH
+  );
+  const message = params.message?.trim();
+  if (!message) throw new Error("--message is required for azdo commit");
+
+  const client = new AzureDevOpsClient(ctx);
+  const result = await commitAndPushAzureDevOpsSource({
+    cwd: process.cwd(),
+    ctx,
+    permission,
+    message,
+    dryRun: params.dryRun,
+    getLiveSourceCommitId: () => client.getLiveSourceCommitId(),
+  });
+
+  if (params.dryRun) {
+    console.log(
+      "Azure DevOps write preflight passed for " +
+        result.branch +
+        " at " +
+        result.previousSha.slice(0, 12) +
+        "; " +
+        result.files.length +
+        " changed file(s)"
+    );
+    return;
+  }
+
+  console.log(
+    "committed and pushed " +
+      result.files.length +
+      " file(s) to " +
+      result.branch +
+      " at " +
+      result.pushedSha.slice(0, 12)
+  );
+}
+
 export async function runCli(params: AzdoCliParams): Promise<void> {
   const parsed = arg(
     {
       "--help": Boolean,
       "--model": String,
       "--dry-run": Boolean,
+      "--push": String,
+      "--message": String,
       "-h": "--help",
       "-m": "--model",
     },
@@ -422,13 +504,33 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
   }
 
   const subcommand = parsed._[0];
-  if (subcommand !== "review" || parsed._.length !== 1) {
+  if (!subcommand || parsed._.length !== 1) {
     printUsage({ stream: console.error, prog: params.prog });
-    throw new Error(subcommand ? "unknown azdo command: " + subcommand : "missing azdo command");
+    throw new Error(subcommand ? "unexpected azdo arguments" : "missing azdo command");
   }
 
-  await runReview({
-    model: parsed["--model"],
-    dryRun: parsed["--dry-run"] === true,
-  });
+  if (subcommand === "review") {
+    await runReview({
+      model: parsed["--model"],
+      dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  if (subcommand === "checkout") {
+    await runCheckout({ push: parsed["--push"] });
+    return;
+  }
+
+  if (subcommand === "commit") {
+    await runCommit({
+      push: parsed["--push"],
+      message: parsed["--message"],
+      dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  printUsage({ stream: console.error, prog: params.prog });
+  throw new Error("unknown azdo command: " + subcommand);
 }
