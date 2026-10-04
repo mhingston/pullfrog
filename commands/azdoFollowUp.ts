@@ -96,6 +96,15 @@ export function selectAzureFollowUp(params: {
     return { kind: "ignored", reason: "Pullfrog does not trigger from its own comments" };
   }
 
+  const commentType = target.commentType;
+  if (
+    commentType !== undefined &&
+    commentType !== 1 &&
+    String(commentType).toLowerCase() !== "text"
+  ) {
+    return { kind: "ignored", reason: "trigger comment is not a user text comment" };
+  }
+
   const request = stripPullfrogMarkers(target.content ?? "");
   if (!request) {
     return { kind: "ignored", reason: "trigger comment is empty" };
@@ -104,8 +113,8 @@ export function selectAzureFollowUp(params: {
   const pullfrogOwnedThread = comments.some(
     (comment) => comment.id !== target.id && isPullfrogComment(comment)
   );
-  const explicitlyMentioned = /(^|\s)@pullfrog\b/i.test(request);
-  const isReply = (target.parentCommentId ?? 0) > 0 || target.id !== comments[0]?.id;
+  const explicitlyMentioned = /(^|[^A-Za-z0-9_])@pullfrog\b/i.test(request);
+  const isReply = (target.parentCommentId ?? 0) > 0;
 
   if (!explicitlyMentioned && !(pullfrogOwnedThread && isReply)) {
     return {
