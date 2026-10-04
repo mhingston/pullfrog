@@ -79,6 +79,13 @@ export function resolveAzureDevOpsContext(
   ).replace(/\/*$/, "/");
   const project = required("SYSTEM_TEAMPROJECT", env.SYSTEM_TEAMPROJECT);
   const repositoryId = required("BUILD_REPOSITORY_ID", env.BUILD_REPOSITORY_ID);
+  const repositoryProvider = env.BUILD_REPOSITORY_PROVIDER?.trim();
+  if (repositoryProvider && repositoryProvider !== "TfsGit") {
+    throw new Error(
+      "pullfrog azdo review currently supports Azure Repos Git only; BUILD_REPOSITORY_PROVIDER=" +
+        repositoryProvider
+    );
+  }
   const pullRequestId = positiveInteger(
     "SYSTEM_PULLREQUEST_PULLREQUESTID",
     env.SYSTEM_PULLREQUEST_PULLREQUESTID
@@ -90,6 +97,11 @@ export function resolveAzureDevOpsContext(
     "SYSTEM_PULLREQUEST_SOURCECOMMITID",
     env.SYSTEM_PULLREQUEST_SOURCECOMMITID
   );
+  if (!/^[0-9a-f]{40}$/i.test(sourceCommitId)) {
+    throw new Error(
+      "Azure DevOps context has invalid SYSTEM_PULLREQUEST_SOURCECOMMITID: " + sourceCommitId
+    );
+  }
   const targetBranch = stripRefsHeads(
     required("SYSTEM_PULLREQUEST_TARGETBRANCH", env.SYSTEM_PULLREQUEST_TARGETBRANCH)
   );
