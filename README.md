@@ -219,7 +219,7 @@ Configure these values as pipeline variables or a variable group, marking `AZURE
 
 The Azure runtime is deliberately narrower than the GitHub Action today:
 
-- automatic review and explicit thread follow-ups are implemented, and separate safe-write primitives can prepare/commit the current PR source branch; autonomous autofix, issue triage, CI-log repair, automatic comment-event transport, arbitrary branch/PR creation, and the Pullfrog cloud console remain GitHub-only;
+- automatic review, explicit thread follow-ups, and scheduled polling for authorized follow-up comments are implemented, and separate safe-write primitives can prepare/commit the current PR source branch; autonomous autofix, issue triage, CI-log repair, Service Hook transport, arbitrary branch/PR creation, and the Pullfrog cloud console remain GitHub-only;
 - it runs OpenCode in an isolated temporary workspace with all native tools denied and treats PR metadata/diff content as untrusted input;
 - it uses `System.AccessToken` by default; `AZURE_DEVOPS_PAT` is available as a local/debug fallback;
 - rerunning the validation updates the existing Pullfrog summary and same-location inline threads, and closes Pullfrog findings that disappeared;
@@ -279,7 +279,58 @@ This slice uses **pipeline queue permission as the authorization boundary**: wri
 
 The model remains read-only and tool-free. Pullfrog captures the Azure REST credential, builds PR/thread/diff context, then scrubs `System.AccessToken` / PAT variables before starting OpenCode. Requests to modify code are answered as guidance only in this slice; they do not invoke the #6 write path or #7 autofix flow.
 
-This is an **ad-hoc/manual transport**, not full automatic comment-event parity. A later #5 slice can add polling or Service Hooks on top of the same PR/thread/comment ingestion and idempotency contract without changing the agent-facing semantics.
+The manual command remains useful for explicit operator-selected requests. Scheduled polling can automate discovery without Service Hooks; Service Hooks can later be added as another transport over the same PR/thread/comment semantics.
+
+### Scheduled follow-up polling
+
+If Service Hooks/webhooks are unavailable, `poll-follow-ups` can make the interactive path automatic by scanning active PRs on a schedule:
+
+```yaml
+trigger: none
+
+schedules:
+  - cron: "*/10 * * * *"
+    displayName: Pullfrog follow-up poll
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+    persistCredentials: true
+
+  - script: npx --yes pullfrog azdo poll-follow-ups --max 5
+    displayName: Poll Azure PR follow-ups
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+      # Required safety gates for automatic transport.
+      # Comma-separated immutable Azure IdentityRef IDs from comment.author.id.
+      PULLFROG_AZDO_ALLOWED_ACTOR_IDS: $(PULLFROG_AZDO_ALLOWED_ACTOR_IDS)
+      # Fixed rollout boundary. Comments older than this are never backfilled.
+      PULLFROG_AZDO_POLL_AFTER: "2026-10-04T00:00:00Z"
+
+      AZURE_API_KEY: $(AZURE_API_KEY)
+      AZURE_RESOURCE_NAME: $(AZURE_RESOURCE_NAME)
+      AZURE_DEPLOYMENT: $(AZURE_DEPLOYMENT)
+      AZURE_CONTEXT: $(AZURE_CONTEXT)
+      AZURE_MAX_OUTPUT: $(AZURE_MAX_OUTPUT)
+```
+
+The poller uses Azure Repos' active-PR list plus each PR's thread list. It never trusts display names for automatic execution: a candidate comment must have an `author.id` present in `PULLFROG_AZDO_ALLOWED_ACTOR_IDS`. The `--after` / `PULLFROG_AZDO_POLL_AFTER` cutoff is also required so enabling polling cannot unexpectedly process historical requests.
+
+Eligible requests use the same semantics as the manual command: explicit `@pullfrog` mentions anywhere, or replies inside Pullfrog-owned threads. Already-handled marker comments are discarded before model invocation. Eligible requests are processed oldest-first, and `--max` caps model-backed work to 1–50 requests per scheduled run (default 10).
+
+Azure YAML schedules use UTC cron expressions. `always: true` is important here because comments can change without the repository source changing.
+
+**Concurrency note:** this slice provides idempotent reply publication, but it does not yet reserve an event before model execution across separate overlapping workers. Two simultaneous scheduled runs can therefore both spend model work on the same newly discovered comment even though reply convergence prevents duplicate final comments. Use an interval/concurrency policy that avoids overlapping poll jobs until the distributed run-reservation slice lands.
+
+The immutable actor allowlist is the authorization boundary for **automatic** polling. The manually queued `follow-up` command retains its separate pipeline-queue authorization model.
 
 ### Safe PR-source writes
 
@@ -331,7 +382,7 @@ Inline findings are only created when Pullfrog can validate the model's file/lin
 
 The Azure review path now runs through the same provider-neutral PR-review contract that can be implemented by GitHub: a small `PullRequestReader` + `ReviewPublisher` boundary and a normalized Pullfrog PR snapshot. Platform SDK/REST response types stay inside their adapters rather than leaking into review orchestration.
 
-Azure Pipelines build validation is treated as the automatic `validation` PR event adapter. Interactive follow-ups currently use an explicit PR/thread/comment pipeline invocation rather than a webhook. Service Hooks or polling can later supply automatic comment-event transport while reusing the same follow-up selection and idempotent reply path.
+Azure Pipelines build validation is treated as the automatic `validation` PR event adapter. Interactive follow-ups support both explicit PR/thread/comment invocation and scheduled polling of active PR threads. Service Hooks can later become another transport while reusing the same trigger selection, actor authorization, and idempotent reply path.
 
 The Azure token boundary is unchanged. The provider captures REST authorization before Pullfrog scrubs Azure DevOps credentials from the process environment; the isolated OpenCode subprocess still cannot access `System.AccessToken`, `AZURE_DEVOPS_TOKEN`, or `AZURE_DEVOPS_PAT`.
 
