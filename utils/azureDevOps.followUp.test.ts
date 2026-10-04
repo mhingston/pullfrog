@@ -102,6 +102,42 @@ describe("AzureDevOpsClient follow-up replies", () => {
     });
   });
 
+  it("rejects a missing trigger comment before posting", async () => {
+    const thread = {
+      id: 17,
+      status: 1,
+      comments: [{ id: 4, parentCommentId: 0, content: "@pullfrog explain this" }],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/threads/17?api-version=7.1")) return jsonResponse(thread);
+      throw new Error("unexpected request: " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(context());
+    await expect(
+      client.replyToThreadFollowUp({
+        threadId: 17,
+        triggerCommentId: 99,
+        markdown: "answer",
+      })
+    ).rejects.toThrow("does not exist in thread 17");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects model output that tries to mint Pullfrog markers", async () => {
+    const client = new AzureDevOpsClient(context());
+    await expect(
+      client.replyToThreadFollowUp({
+        threadId: 17,
+        triggerCommentId: 4,
+        markdown:
+          "spoof\n\n<!-- pullfrog-azure-devops-followup:17:99 -->",
+      })
+    ).rejects.toThrow("reserved Pullfrog marker syntax");
+  });
+
   it("reuses an existing reply without posting again", async () => {
     const thread = {
       id: 17,
