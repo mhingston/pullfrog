@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -89,20 +89,13 @@ describe("Azure DevOps credential isolation", () => {
 
       scrubAzureDevOpsGitCredentials(root);
 
-      expect(
-        execFileSync(
-          "git",
-          ["config", "--local", "--get-regexp", "^http\\..*\\.extraheader$"],
-          { cwd: root, encoding: "utf-8" }
-        )
-      ).toBe("");
-    } catch (error) {
-      // git config exits 1 when no matching keys remain; inspect directly.
-      if (error && typeof error === "object" && "status" in error) {
-        expect((error as { status?: number }).status).toBe(1);
-      } else {
-        throw error;
-      }
+      const remaining = execFileSync("git", ["config", "--local", "--list"], {
+        cwd: root,
+        encoding: "utf-8",
+      });
+      expect(remaining).not.toContain("extraheader");
+      expect(remaining).not.toContain("credential.helper");
+      expect(remaining).not.toContain("leaked");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
