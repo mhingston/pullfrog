@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 
 export const AZDO_REVIEW_MARKER_PREFIX = "<!-- pullfrog-azure-devops-review:";
 export const AZDO_FINDING_MARKER_PREFIX = "<!-- pullfrog-azure-devops-finding:";
+export const AZDO_FOLLOWUP_MARKER_PREFIX = "<!-- pullfrog-azure-devops-followup:";
 export const AZDO_STATUS_GENRE = "pullfrog";
 export const AZDO_STATUS_NAME = "review";
 
@@ -31,20 +32,27 @@ export function azureDevOpsFindingMarker(
   );
 }
 
-export interface AzureDevOpsContext {
+export interface AzureDevOpsRepositoryContext {
   collectionUri: string;
   project: string;
   repositoryId: string;
   repositoryUri: string;
   defaultBranch: string;
+  authorization: string;
+}
+
+export interface AzureDevOpsContext extends AzureDevOpsRepositoryContext {
   pullRequestId: number;
   sourceBranch: string;
   sourceCommitId: string;
   targetBranch: string;
-  authorization: string;
 }
 
-interface AzureDevOpsPullRequest {
+export type AzureDevOpsClientContext = AzureDevOpsRepositoryContext & {
+  pullRequestId: number;
+};
+
+export interface AzureDevOpsPullRequest {
   pullRequestId: number;
   title: string;
   description?: string | null;
@@ -55,13 +63,23 @@ interface AzureDevOpsPullRequest {
   url?: string | undefined;
 }
 
-interface AzureDevOpsComment {
-  id: number;
-  content?: string | null;
-  isDeleted?: boolean | undefined;
+export interface AzureDevOpsIdentity {
+  id?: string | undefined;
+  displayName?: string | undefined;
+  uniqueName?: string | undefined;
 }
 
-interface AzureDevOpsThread {
+export interface AzureDevOpsComment {
+  id: number;
+  parentCommentId?: number | undefined;
+  content?: string | null;
+  isDeleted?: boolean | undefined;
+  commentType?: number | string | undefined;
+  author?: AzureDevOpsIdentity | undefined;
+  publishedDate?: string | undefined;
+}
+
+export interface AzureDevOpsThread {
   id: number;
   comments?: AzureDevOpsComment[] | undefined;
   isDeleted?: boolean | undefined;
@@ -149,9 +167,9 @@ export function buildAzureDevOpsAuthorization(env: NodeJS.ProcessEnv): string {
   );
 }
 
-export function resolveAzureDevOpsContext(
+export function resolveAzureDevOpsRepositoryContext(
   env: NodeJS.ProcessEnv = process.env
-): AzureDevOpsContext {
+): AzureDevOpsRepositoryContext {
   const collectionUri = required(
     "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
     env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI || env.SYSTEM_COLLECTIONURI
@@ -165,10 +183,24 @@ export function resolveAzureDevOpsContext(
   const repositoryProvider = env.BUILD_REPOSITORY_PROVIDER?.trim();
   if (repositoryProvider && repositoryProvider !== "TfsGit") {
     throw new Error(
-      "pullfrog azdo review currently supports Azure Repos Git only; BUILD_REPOSITORY_PROVIDER=" +
+      "pullfrog azdo currently supports Azure Repos Git only; BUILD_REPOSITORY_PROVIDER=" +
         repositoryProvider
     );
   }
+  return {
+    collectionUri,
+    project,
+    repositoryId,
+    repositoryUri,
+    defaultBranch,
+    authorization: buildAzureDevOpsAuthorization(env),
+  };
+}
+
+export function resolveAzureDevOpsContext(
+  env: NodeJS.ProcessEnv = process.env
+): AzureDevOpsContext {
+  const repository = resolveAzureDevOpsRepositoryContext(env);
   const pullRequestId = positiveInteger(
     "SYSTEM_PULLREQUEST_PULLREQUESTID",
     env.SYSTEM_PULLREQUEST_PULLREQUESTID
@@ -190,16 +222,11 @@ export function resolveAzureDevOpsContext(
   );
 
   return {
-    collectionUri,
-    project,
-    repositoryId,
-    repositoryUri,
-    defaultBranch,
+    ...repository,
     pullRequestId,
     sourceBranch,
     sourceCommitId,
     targetBranch,
-    authorization: buildAzureDevOpsAuthorization(env),
   };
 }
 
@@ -307,9 +334,9 @@ export function buildAzureDevOpsPullRequestDiff(params: {
 }
 
 export class AzureDevOpsClient {
-  readonly #ctx: AzureDevOpsContext;
+  readonly #ctx: AzureDevOpsClientContext;
 
-  constructor(ctx: AzureDevOpsContext) {
+  constructor(ctx: AzureDevOpsClientContext) {
     this.#ctx = ctx;
   }
 
@@ -346,11 +373,88 @@ export class AzureDevOpsClient {
       );
     }
 
-    return (await response.json()) as T;
+    const text = await response.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
   }
 
   async getPullRequest(): Promise<AzureDevOpsPullRequest> {
     return await this.#request<AzureDevOpsPullRequest>("?api-version=7.1");
+  }
+
+  async getThread(threadId: number): Promise<AzureDevOpsThread> {
+    if (!Number.isInteger(threadId) || threadId <= 0) {
+      throw new Error("Azure DevOps thread id must be a positive integer");
+    }
+    return await this.#request<AzureDevOpsThread>(
+      "/threads/" + threadId + "?api-version=7.1"
+    );
+  }
+
+  async replyToThreadFollowUp(params: {
+    threadId: number;
+    triggerCommentId: number;
+    markdown: string;
+    resolve?: boolean | undefined;
+  }): Promise<{ created: boolean; commentId: number }> {
+    const thread = await this.getThread(params.threadId);
+    const marker =
+      AZDO_FOLLOWUP_MARKER_PREFIX +
+      params.threadId +
+      ":" +
+      params.triggerCommentId +
+      " -->";
+    const existing = (thread.comments ?? [])
+      .filter(
+        (comment) =>
+          !comment.isDeleted &&
+          typeof comment.content === "string" &&
+          comment.content.includes(marker)
+      )
+      .sort((a, b) => a.id - b.id);
+
+    if (existing[0]) {
+      if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
+      return { created: false, commentId: existing[0].id };
+    }
+
+    const posted = await this.#request<AzureDevOpsComment>(
+      "/threads/" + params.threadId + "/comments?api-version=7.1",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          parentCommentId: params.triggerCommentId,
+          content: params.markdown.trim() + "\n\n" + marker,
+          commentType: 1,
+        }),
+      }
+    );
+
+    // POST is not conditional. Converge overlapping retries by keeping the
+    // lowest marker-bearing comment ID and deleting later duplicates.
+    const after = await this.getThread(params.threadId);
+    const matching = (after.comments ?? [])
+      .filter(
+        (comment) =>
+          !comment.isDeleted &&
+          typeof comment.content === "string" &&
+          comment.content.includes(marker)
+      )
+      .sort((a, b) => a.id - b.id);
+    const canonical = matching[0] ?? posted;
+    for (const duplicate of matching.slice(1)) {
+      await this.#request<void>(
+        "/threads/" +
+          params.threadId +
+          "/comments/" +
+          duplicate.id +
+          "?api-version=7.1",
+        { method: "DELETE" }
+      );
+    }
+
+    if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
+    return { created: canonical.id === posted.id, commentId: canonical.id };
   }
 
   async #listIterations(): Promise<AzureDevOpsIteration[]> {
