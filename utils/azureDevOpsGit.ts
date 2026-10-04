@@ -21,12 +21,34 @@ export interface AzureDevOpsWriteResult {
   files: string[];
 }
 
+const SENSITIVE_GIT_ENV = [
+  "GIT_ASKPASS",
+  "SSH_ASKPASS",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+  "GIT_PROXY_COMMAND",
+  "GIT_EXEC_PATH",
+  "GIT_CONFIG_PARAMETERS",
+] as const;
+
+function credentialFreeEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  delete env.SYSTEM_ACCESSTOKEN;
+  delete env.AZURE_DEVOPS_TOKEN;
+  delete env.AZURE_DEVOPS_PAT;
+  for (const name of SENSITIVE_GIT_ENV) delete env[name];
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_CONFIG_COUNT = "0";
+  env.GIT_CONFIG_PARAMETERS = "";
+  return env;
+}
+
 function git(cwd: string, args: string[], options?: { env?: NodeJS.ProcessEnv }): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     maxBuffer: 32 * 1024 * 1024,
-    env: options?.env,
+    env: credentialFreeEnv(options?.env),
   }).trimEnd();
 }
 
@@ -114,6 +136,7 @@ function localConfigKeys(cwd: string, pattern: string): string[] {
   const result = spawnSync("git", ["config", "--local", "--name-only", "--get-regexp", pattern], {
     cwd,
     encoding: "utf-8",
+    env: credentialFreeEnv(),
   });
   if (result.status === 1) return [];
   if (result.error) throw result.error;
@@ -134,10 +157,20 @@ export function scrubAzureDevOpsGitCredentials(cwd: string): void {
     ...localConfigKeys(cwd, "^credential\\."),
   ]);
   for (const key of keys) {
-    spawnSync("git", ["config", "--local", "--unset-all", key], {
+    const result = spawnSync("git", ["config", "--local", "--unset-all", key], {
       cwd,
       encoding: "utf-8",
+      env: credentialFreeEnv(),
     });
+    if (result.error) throw result.error;
+    if (result.status !== 0 && result.status !== 5) {
+      throw new Error(
+        "failed to remove persisted Azure git credential config " +
+          key +
+          ": " +
+          String(result.stderr || result.stdout || "").trim()
+      );
+    }
   }
 }
 
@@ -170,32 +203,12 @@ function authenticatedGit(
   mkdirSync(hooksDir);
   mkdirSync(homeDir);
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+  const env = credentialFreeEnv({
     HOME: homeDir,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: join(isolated, "global.gitconfig"),
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_COUNT: "0",
-    GIT_CONFIG_PARAMETERS: "",
     PULLFROG_AZDO_GIT_HEADER: "AUTHORIZATION: " + ctx.authorization,
-  };
-  delete env.SYSTEM_ACCESSTOKEN;
-  delete env.AZURE_DEVOPS_TOKEN;
-  delete env.AZURE_DEVOPS_PAT;
-  // Do not inherit transport/auth hooks from the outer runner. Authenticated
-  // git is parent-owned and deliberately non-extensible while the token-backed
-  // header is live.
-  for (const name of [
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-    "GIT_SSH",
-    "GIT_SSH_COMMAND",
-    "GIT_PROXY_COMMAND",
-    "GIT_EXEC_PATH",
-  ]) {
-    delete env[name];
-  }
+  });
 
   const fullArgs = [
     "-c",
@@ -328,6 +341,7 @@ function assertNoInProgressGitOperation(cwd: string): void {
     const result = spawnSync("git", ["rev-parse", "-q", "--verify", ref], {
       cwd,
       encoding: "utf-8",
+      env: credentialFreeEnv(),
     });
     if (result.status === 0) {
       throw new Error(
@@ -470,14 +484,11 @@ export async function commitAndPushAzureDevOpsSource(params: {
         cwd: params.cwd,
         encoding: "utf-8",
         maxBuffer: 32 * 1024 * 1024,
-        env: {
-          ...process.env,
+        env: credentialFreeEnv({
           HOME: isolated,
           GIT_CONFIG_NOSYSTEM: "1",
           GIT_CONFIG_GLOBAL: join(isolated, "global.gitconfig"),
-          GIT_CONFIG_COUNT: "0",
-          GIT_CONFIG_PARAMETERS: "",
-        },
+        }),
       }
     );
     if (commit.error) throw commit.error;
