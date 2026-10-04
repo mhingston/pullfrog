@@ -84,6 +84,40 @@ describe("Azure follow-up selection", () => {
     expect(result.kind).toBe("trigger");
   });
 
+  it("accepts punctuation before an explicit @pullfrog mention", () => {
+    const result = selectAzureFollowUp({
+      thread: thread([
+        {
+          id: 1,
+          parentCommentId: 0,
+          content: "Question: (@pullfrog) why this approach?",
+          commentType: "text",
+        },
+      ]),
+      commentId: 1,
+    });
+    expect(result.kind).toBe("trigger");
+  });
+
+  it("ignores system comments even if they contain a mention", () => {
+    expect(
+      selectAzureFollowUp({
+        thread: thread([
+          {
+            id: 1,
+            parentCommentId: 0,
+            content: "@pullfrog synthetic system text",
+            commentType: "system",
+          },
+        ]),
+        commentId: 1,
+      })
+    ).toEqual({
+      kind: "ignored",
+      reason: "trigger comment is not a user text comment",
+    });
+  });
+
   it("ignores an unrelated new human thread", () => {
     expect(
       selectAzureFollowUp({
