@@ -173,6 +173,95 @@ describe("AzureDevOpsClient follow-up replies", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("reconciles duplicate replies left by an earlier crashed run", async () => {
+    const thread = {
+      id: 17,
+      status: 1,
+      comments: [
+        { id: 4, parentCommentId: 0, content: "@pullfrog explain this" },
+        {
+          id: 5,
+          parentCommentId: 4,
+          content:
+            "first answer\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+        },
+        {
+          id: 6,
+          parentCommentId: 4,
+          content:
+            "duplicate answer\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+        },
+      ],
+    };
+    const deleted: number[] = [];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/threads/17?api-version=7.1") && method === "GET") {
+        return jsonResponse(thread);
+      }
+      if (url.endsWith("/threads/17/comments/6?api-version=7.1") && method === "DELETE") {
+        deleted.push(6);
+        return jsonResponse(undefined);
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(context());
+    await expect(
+      client.reconcileThreadFollowUp({
+        threadId: 17,
+        triggerCommentId: 4,
+      })
+    ).resolves.toEqual({ commentId: 5 });
+
+    expect(deleted).toEqual([6]);
+  });
+
+  it("applies requested resolution when retrying an already-posted reply", async () => {
+    const thread = {
+      id: 17,
+      status: 1,
+      comments: [
+        { id: 4, parentCommentId: 0, content: "@pullfrog resolve this" },
+        {
+          id: 5,
+          parentCommentId: 4,
+          content:
+            "answer\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+        },
+      ],
+    };
+    let patchedStatus: number | undefined;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/threads/17?api-version=7.1") && method === "GET") {
+        return jsonResponse(thread);
+      }
+      if (url.endsWith("/threads/17?api-version=7.1") && method === "PATCH") {
+        patchedStatus = JSON.parse(String(init?.body)).status;
+        return jsonResponse({ ...thread, status: patchedStatus });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(context());
+    await expect(
+      client.reconcileThreadFollowUp({
+        threadId: 17,
+        triggerCommentId: 4,
+        resolve: true,
+      })
+    ).resolves.toEqual({ commentId: 5 });
+
+    expect(patchedStatus).toBe(4);
+  });
+
   it("converges concurrent duplicate replies onto the lowest comment id", async () => {
     const thread = {
       id: 17,
