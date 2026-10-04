@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -45,6 +45,12 @@ function requirePositiveInteger(name: string): void {
 }
 
 function validateModelEnvironment(model: string): void {
+  if (model.startsWith("opencode/") || model.startsWith("opencode-go/")) {
+    throw new Error(
+      "OpenCode Zen/Go models are not supported by the isolated Azure DevOps reviewer because their gateway requires tool schemas. " +
+        "Use Azure OpenAI or another concrete provider/model."
+    );
+  }
   if (!model.startsWith(AZURE_PROVIDER + "/")) return;
 
   for (const name of [AZURE_RESOURCE_NAME_ENV, AZURE_API_KEY_ENV]) {
@@ -93,6 +99,7 @@ function stripAnsi(value: string): string {
 }
 
 const READ_ONLY_PERMISSIONS = {
+  "*": "deny",
   bash: "deny",
   edit: "deny",
   webfetch: "deny",
@@ -191,9 +198,6 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
     process.env.PULLFROG_TEMP_DIR = tempDir;
 
     try {
-      const diffPath = join(tempDir, "pull-request.diff");
-      writeFileSync(diffPath, diff.diff);
-
       const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
       const prompt = reviewPrompt({
         title: pullRequest.title,
@@ -203,24 +207,45 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
         truncatedDiff: diff.truncated,
       });
 
+      const reviewInput = [
+        prompt,
+        "",
+        "--- BEGIN AZURE REPOS PR DIFF ---",
+        diff.diff,
+        "--- END AZURE REPOS PR DIFF ---",
+      ].join("\n");
+
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: tempDir,
+        PWD: tempDir,
+        XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
+        XDG_DATA_HOME: join(tempDir, "xdg-data"),
+        OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
+        OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
+        OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+        OPENCODE_PURE: "true",
+        OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+        OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+        OPENCODE_DISABLE_CLAUDE_CODE: "true",
+        OPENCODE_EXPERIMENTAL: "false",
+        OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
+      };
+      // These selectors can point back into the checked-out repository and load
+      // untrusted plugins/MCP config outside the tool-permission boundary.
+      delete childEnv.OPENCODE_CONFIG;
+      delete childEnv.OPENCODE_CONFIG_DIR;
+      delete childEnv.OPENCODE_TUI_CONFIG;
+
       const child = spawnSync(
         cliPath,
-        ["run", "--model", model, "--file", diffPath, "--dir", tempDir, prompt],
+        ["run", "--model", model, "--dir", tempDir],
         {
           cwd: tempDir,
+          input: reviewInput,
           encoding: "utf-8",
           maxBuffer: 16 * 1024 * 1024,
-          env: {
-            ...process.env,
-            HOME: tempDir,
-            PWD: tempDir,
-            XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
-            XDG_DATA_HOME: join(tempDir, "xdg-data"),
-            OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
-            OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
-            OPENCODE_EXPERIMENTAL: "",
-            OPENCODE_EXPERIMENTAL_CODE_MODE: "",
-          },
+          env: childEnv,
         }
       );
 
@@ -240,14 +265,37 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
       const body = [
         "## Pullfrog review",
         "",
+        ...(diff.truncated
+          ? [
+              "> ⚠️ **Partial review:** the PR diff exceeded Pullfrog's context cap, so later changes were omitted.",
+              "",
+            ]
+          : []),
         review,
         "",
         "---",
-        "Model: " + model + " · merge base: " + diff.mergeBase.slice(0, 12),
+        "Model: " +
+          model +
+          " · source: " +
+          ctx.sourceCommitId.slice(0, 12) +
+          " · merge base: " +
+          diff.mergeBase.slice(0, 12),
       ].join("\n");
 
       if (params.dryRun) {
         console.log(body);
+        return;
+      }
+
+      const currentPullRequest = await client.getPullRequest();
+      const currentSourceCommit = currentPullRequest.lastMergeSourceCommit?.commitId;
+      if (currentSourceCommit && currentSourceCommit !== ctx.sourceCommitId) {
+        console.log(
+          "skipping Azure DevOps review publication: PR advanced from " +
+            ctx.sourceCommitId.slice(0, 12) +
+            " to " +
+            currentSourceCommit.slice(0, 12)
+        );
         return;
       }
 
