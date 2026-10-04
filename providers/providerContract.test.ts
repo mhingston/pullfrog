@@ -22,6 +22,7 @@ function azureFixture(): {
     collectionUri: "https://dev.azure.com/acme/",
     project: "Platform",
     repositoryId: "repo-guid",
+    repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
     pullRequestId: 42,
     sourceBranch: "feature/provider",
     sourceCommitId: sourceSha,
