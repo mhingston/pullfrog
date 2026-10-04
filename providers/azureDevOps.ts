@@ -69,12 +69,19 @@ export class AzureDevOpsPullRequestProvider implements PullRequestReviewProvider
       review.sourceSha
     );
 
-    if (!publication.published) return publication;
+    if (!publication.published) {
+      return {
+        published: false,
+        consistency: "source-convergent",
+        supersededBy: publication.supersededBy,
+      };
+    }
 
     return {
       published: true,
       created: publication.created,
       id: String(publication.threadId),
+      consistency: "source-convergent",
     };
   }
 }
