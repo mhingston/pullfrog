@@ -117,18 +117,18 @@ function git(cwd: string, args: string[]): string {
 function ensureRemoteRef(params: { cwd: string; branch: string }): string {
   const remoteRef = "refs/remotes/origin/" + params.branch;
   try {
-    git(params.cwd, ["rev-parse", "--verify", "--quiet", remoteRef]);
+    git(params.cwd, [
+      "fetch",
+      "--no-tags",
+      "origin",
+      "refs/heads/" + params.branch + ":" + remoteRef,
+    ]);
     return remoteRef;
-  } catch {
+  } catch (error) {
     try {
-      git(params.cwd, [
-        "fetch",
-        "--no-tags",
-        "origin",
-        "refs/heads/" + params.branch + ":" + remoteRef,
-      ]);
+      git(params.cwd, ["rev-parse", "--verify", "--quiet", remoteRef]);
       return remoteRef;
-    } catch (error) {
+    } catch {
       throw new Error(
         "cannot fetch Azure DevOps branch " +
           params.branch +
@@ -195,7 +195,7 @@ export function buildAzureDevOpsPullRequestDiff(params: {
     );
   }
 
-  const maxChars = params.maxChars ?? 500_000;
+  const maxChars = params.maxChars ?? 250_000;
   if (raw.length <= maxChars) {
     return { diff: raw, mergeBase, truncated: false };
   }
