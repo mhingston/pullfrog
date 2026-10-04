@@ -391,74 +391,21 @@ export class AzureDevOpsClient {
     );
   }
 
-  async replyToThreadFollowUp(params: {
-    threadId: number;
-    triggerCommentId: number;
-    markdown: string;
-    resolve?: boolean | undefined;
-  }): Promise<{ created: boolean; commentId: number }> {
-    if (!Number.isInteger(params.triggerCommentId) || params.triggerCommentId <= 0) {
-      throw new Error("Azure DevOps trigger comment id must be a positive integer");
-    }
-    const markdown = params.markdown.trim();
-    if (!markdown) {
-      throw new Error("Azure DevOps follow-up reply must not be empty");
-    }
-    if (/<!--\s*pullfrog-azure-devops-/i.test(markdown)) {
-      throw new Error(
-        "Azure DevOps follow-up reply contains reserved Pullfrog marker syntax"
-      );
-    }
-
-    const thread = await this.getThread(params.threadId);
-    const trigger = (thread.comments ?? []).find(
-      (comment) => comment.id === params.triggerCommentId && !comment.isDeleted
-    );
-    if (!trigger) {
-      throw new Error(
-        "Azure DevOps trigger comment " +
-          params.triggerCommentId +
-          " does not exist in thread " +
-          params.threadId
-      );
-    }
-
-    const marker =
+  #followUpMarker(threadId: number, triggerCommentId: number): string {
+    return (
       AZDO_FOLLOWUP_MARKER_PREFIX +
-      params.threadId +
+      threadId +
       ":" +
-      params.triggerCommentId +
-      " -->";
-    const existing = (thread.comments ?? [])
-      .filter(
-        (comment) =>
-          !comment.isDeleted &&
-          typeof comment.content === "string" &&
-          comment.content.includes(marker)
-      )
-      .sort((a, b) => a.id - b.id);
-
-    if (existing[0]) {
-      if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
-      return { created: false, commentId: existing[0].id };
-    }
-
-    const posted = await this.#request<AzureDevOpsComment>(
-      "/threads/" + params.threadId + "/comments?api-version=7.1",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          parentCommentId: params.triggerCommentId,
-          content: markdown + "\n\n" + marker,
-          commentType: 1,
-        }),
-      }
+      triggerCommentId +
+      " -->"
     );
+  }
 
-    // POST is not conditional. Converge overlapping retries by keeping the
-    // lowest marker-bearing comment ID and deleting later duplicates.
-    const after = await this.getThread(params.threadId);
-    const matching = (after.comments ?? [])
+  #followUpComments(
+    thread: AzureDevOpsThread,
+    marker: string
+  ): AzureDevOpsComment[] {
+    return (thread.comments ?? [])
       .filter(
         (comment) =>
           !comment.isDeleted &&
@@ -466,12 +413,17 @@ export class AzureDevOpsClient {
           comment.content.includes(marker)
       )
       .sort((a, b) => a.id - b.id);
-    const canonical = matching[0] ?? posted;
-    for (const duplicate of matching.slice(1)) {
+  }
+
+  async #deleteDuplicateFollowUpComments(
+    threadId: number,
+    comments: AzureDevOpsComment[]
+  ): Promise<void> {
+    for (const duplicate of comments.slice(1)) {
       try {
         await this.#request<void>(
           "/threads/" +
-            params.threadId +
+            threadId +
             "/comments/" +
             duplicate.id +
             "?api-version=7.1",
@@ -488,6 +440,93 @@ export class AzureDevOpsClient {
         }
       }
     }
+  }
+
+  async reconcileThreadFollowUp(params: {
+    threadId: number;
+    triggerCommentId: number;
+    resolve?: boolean | undefined;
+  }): Promise<{ commentId: number } | undefined> {
+    if (!Number.isInteger(params.triggerCommentId) || params.triggerCommentId <= 0) {
+      throw new Error("Azure DevOps trigger comment id must be a positive integer");
+    }
+
+    const thread = await this.getThread(params.threadId);
+    const trigger = (thread.comments ?? []).find(
+      (comment) => comment.id === params.triggerCommentId && !comment.isDeleted
+    );
+    if (!trigger) {
+      throw new Error(
+        "Azure DevOps trigger comment " +
+          params.triggerCommentId +
+          " does not exist in thread " +
+          params.threadId
+      );
+    }
+
+    const marker = this.#followUpMarker(
+      params.threadId,
+      params.triggerCommentId
+    );
+    const existing = this.#followUpComments(thread, marker);
+    const canonical = existing[0];
+    if (!canonical) return undefined;
+
+    // Retry is a convergence path too: if an earlier overlapping run crashed
+    // after POST, clean up any marker-bearing duplicates before returning.
+    await this.#deleteDuplicateFollowUpComments(params.threadId, existing);
+    if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
+
+    return { commentId: canonical.id };
+  }
+
+  async replyToThreadFollowUp(params: {
+    threadId: number;
+    triggerCommentId: number;
+    markdown: string;
+    resolve?: boolean | undefined;
+  }): Promise<{ created: boolean; commentId: number }> {
+    const markdown = params.markdown.trim();
+    if (!markdown) {
+      throw new Error("Azure DevOps follow-up reply must not be empty");
+    }
+    if (/<!--\s*pullfrog-azure-devops-/i.test(markdown)) {
+      throw new Error(
+        "Azure DevOps follow-up reply contains reserved Pullfrog marker syntax"
+      );
+    }
+
+    const reconciled = await this.reconcileThreadFollowUp({
+      threadId: params.threadId,
+      triggerCommentId: params.triggerCommentId,
+      resolve: params.resolve,
+    });
+    if (reconciled) {
+      return { created: false, commentId: reconciled.commentId };
+    }
+
+    const marker = this.#followUpMarker(
+      params.threadId,
+      params.triggerCommentId
+    );
+    const posted = await this.#request<AzureDevOpsComment>(
+      "/threads/" + params.threadId + "/comments?api-version=7.1",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          parentCommentId: params.triggerCommentId,
+          content: markdown + "\n\n" + marker,
+          commentType: 1,
+        }),
+      }
+    );
+
+    // POST is not conditional. Converge overlapping retries by keeping the
+    // lowest marker-bearing comment ID and deleting later duplicates.
+    const after = await this.getThread(params.threadId);
+    const matching = this.#followUpComments(after, marker);
+    const canonical = matching[0] ?? posted;
+    await this.#deleteDuplicateFollowUpComments(params.threadId, matching);
 
     if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
     return { created: canonical.id === posted.id, commentId: canonical.id };
