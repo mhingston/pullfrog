@@ -324,12 +324,34 @@ function assertNoInProgressGitOperation(cwd: string): void {
   }
 }
 
+function splitNullList(value: string): string[] {
+  return value.split("\0").filter(Boolean);
+}
+
 function changedFiles(cwd: string): string[] {
-  return git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"])
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => line.slice(3).trim())
-    .filter(Boolean);
+  const tracked = splitNullList(git(cwd, ["diff", "--name-only", "-z", "HEAD", "--"]));
+  const untracked = splitNullList(
+    git(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--"])
+  );
+  return [...new Set([...tracked, ...untracked])].sort();
+}
+
+function assertNoChangedLfsFiles(cwd: string, files: string[]): void {
+  for (let i = 0; i < files.length; i += 100) {
+    const batch = files.slice(i, i + 100);
+    const attributes = git(cwd, ["check-attr", "filter", "--", ...batch]);
+    const lfs = attributes
+      .split("\n")
+      .filter((line) => line.trim().endsWith(": filter: lfs"));
+    if (lfs.length > 0) {
+      throw new Error(
+        "Azure DevOps write blocked: changed Git-LFS files require the LFS pre-push hook, " +
+          "which is intentionally disabled while Pullfrog holds repository credentials. " +
+          "LFS writes are not supported by this safe-write slice.\n\n" +
+          lfs.join("\n")
+      );
+    }
+  }
 }
 
 export async function commitAndPushAzureDevOpsSource(params: {
@@ -401,6 +423,7 @@ export async function commitAndPushAzureDevOpsSource(params: {
   if (files.length === 0) {
     throw new Error("Azure DevOps commit blocked: working tree has no changes");
   }
+  assertNoChangedLfsFiles(params.cwd, files);
 
   if (params.dryRun) {
     return {
@@ -411,7 +434,7 @@ export async function commitAndPushAzureDevOpsSource(params: {
     };
   }
 
-  git(params.cwd, ["add", "-A", "--", "."]);
+  git(params.cwd, ["add", "-A", "--", ":/"]);
 
   const isolated = mkdtempSync(join(tmpdir(), "pullfrog-azdo-commit-"));
   try {
