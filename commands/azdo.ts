@@ -15,7 +15,11 @@ import {
 } from "../models.ts";
 import { azureProvider, installOpencodeCli, type OpenCodeConfig } from "../agents/opencodeShared.ts";
 import {
-  AzureDevOpsClient,
+  AzureDevOpsPullRequestProvider,
+  azureDevOpsValidationEvent,
+} from "../providers/azureDevOps.ts";
+import { runPullRequestReview } from "../providers/review.ts";
+import {
   buildAzureDevOpsPullRequestDiff,
   resolveAzureDevOpsContext,
 } from "../utils/azureDevOps.ts";
@@ -177,136 +181,144 @@ function scrubAzureDevOpsAuth(): () => void {
 
 async function runReview(params: { model: string | undefined; dryRun: boolean }): Promise<void> {
   const ctx = resolveAzureDevOpsContext();
-  const client = new AzureDevOpsClient(ctx);
-  const pullRequest = await client.getPullRequest();
+  const event = azureDevOpsValidationEvent(ctx);
+  const provider = new AzureDevOpsPullRequestProvider(ctx);
+
+  // The provider captures the Azure authorization in its private client before
+  // the environment is scrubbed. The model subprocess never receives Azure
+  // DevOps credentials, while publication can still happen after review.
   const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
 
   try {
     const model = resolveModel(params.model);
     validateModelEnvironment(model);
-
     const cwd = process.cwd();
-    const diff = buildAzureDevOpsPullRequestDiff({
-      cwd,
-      sourceBranch: ctx.sourceBranch,
-      sourceCommitId: ctx.sourceCommitId,
-      targetBranch: ctx.targetBranch,
+
+    const result = await runPullRequestReview({
+      provider,
+      dryRun: params.dryRun,
+      review: async (pullRequest) => {
+        const diff = buildAzureDevOpsPullRequestDiff({
+          cwd,
+          sourceBranch: ctx.sourceBranch,
+          sourceCommitId: event.sourceSha,
+          targetBranch: ctx.targetBranch,
+        });
+
+        const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-"));
+        const priorTempDir = process.env.PULLFROG_TEMP_DIR;
+        process.env.PULLFROG_TEMP_DIR = tempDir;
+
+        try {
+          const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
+          const prompt = reviewPrompt({
+            title: pullRequest.title,
+            description: pullRequest.description,
+            sourceBranch: pullRequest.source.ref,
+            targetBranch: pullRequest.target.ref,
+            truncatedDiff: diff.truncated,
+          });
+
+          const reviewInput = [
+            prompt,
+            "",
+            "--- BEGIN AZURE REPOS PR DIFF ---",
+            diff.diff,
+            "--- END AZURE REPOS PR DIFF ---",
+          ].join("\n");
+
+          const childEnv: NodeJS.ProcessEnv = {
+            ...process.env,
+            HOME: tempDir,
+            PWD: tempDir,
+            XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
+            XDG_DATA_HOME: join(tempDir, "xdg-data"),
+            OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
+            OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
+            OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+            OPENCODE_PURE: "true",
+            OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+            OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+            OPENCODE_DISABLE_CLAUDE_CODE: "true",
+            OPENCODE_EXPERIMENTAL: "false",
+            OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
+          };
+          // These selectors can point back into the checked-out repository and load
+          // untrusted plugins/MCP config outside the tool-permission boundary.
+          delete childEnv.OPENCODE_CONFIG;
+          delete childEnv.OPENCODE_CONFIG_DIR;
+          delete childEnv.OPENCODE_TUI_CONFIG;
+
+          const child = spawnSync(cliPath, ["run", "--model", model, "--dir", tempDir], {
+            cwd: tempDir,
+            input: reviewInput,
+            encoding: "utf-8",
+            maxBuffer: 16 * 1024 * 1024,
+            env: childEnv,
+          });
+
+          if (child.error) throw child.error;
+          if (child.status !== 0) {
+            const details = stripAnsi(child.stderr || child.stdout || "");
+            throw new Error(
+              "OpenCode review failed with exit " +
+                child.status +
+                (details ? ": " + details.slice(-4000) : "")
+            );
+          }
+
+          const review = capReview(stripAnsi(child.stdout || ""));
+          if (!review) throw new Error("OpenCode returned an empty Azure DevOps review");
+
+          return [
+            "## Pullfrog review",
+            "",
+            ...(diff.truncated
+              ? [
+                  "> ⚠️ **Partial review:** the PR diff exceeded Pullfrog's context cap, so later changes were omitted.",
+                  "",
+                ]
+              : []),
+            review,
+            "",
+            "---",
+            "Model: " +
+              model +
+              " · source: " +
+              pullRequest.source.sha.slice(0, 12) +
+              " · merge base: " +
+              diff.mergeBase.slice(0, 12),
+          ].join("\n");
+        } finally {
+          if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
+          else process.env.PULLFROG_TEMP_DIR = priorTempDir;
+          rmSync(tempDir, { recursive: true, force: true });
+        }
+      },
     });
 
-    const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-"));
-    const priorTempDir = process.env.PULLFROG_TEMP_DIR;
-    process.env.PULLFROG_TEMP_DIR = tempDir;
-
-    try {
-      const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
-      const prompt = reviewPrompt({
-        title: pullRequest.title,
-        description: pullRequest.description ?? "",
-        sourceBranch: ctx.sourceBranch,
-        targetBranch: ctx.targetBranch,
-        truncatedDiff: diff.truncated,
-      });
-
-      const reviewInput = [
-        prompt,
-        "",
-        "--- BEGIN AZURE REPOS PR DIFF ---",
-        diff.diff,
-        "--- END AZURE REPOS PR DIFF ---",
-      ].join("\n");
-
-      const childEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        HOME: tempDir,
-        PWD: tempDir,
-        XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
-        XDG_DATA_HOME: join(tempDir, "xdg-data"),
-        OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
-        OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
-        OPENCODE_DISABLE_PROJECT_CONFIG: "true",
-        OPENCODE_PURE: "true",
-        OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
-        OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
-        OPENCODE_DISABLE_CLAUDE_CODE: "true",
-        OPENCODE_EXPERIMENTAL: "false",
-        OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
-      };
-      // These selectors can point back into the checked-out repository and load
-      // untrusted plugins/MCP config outside the tool-permission boundary.
-      delete childEnv.OPENCODE_CONFIG;
-      delete childEnv.OPENCODE_CONFIG_DIR;
-      delete childEnv.OPENCODE_TUI_CONFIG;
-
-      const child = spawnSync(
-        cliPath,
-        ["run", "--model", model, "--dir", tempDir],
-        {
-          cwd: tempDir,
-          input: reviewInput,
-          encoding: "utf-8",
-          maxBuffer: 16 * 1024 * 1024,
-          env: childEnv,
-        }
-      );
-
-      if (child.error) throw child.error;
-      if (child.status !== 0) {
-        const details = stripAnsi(child.stderr || child.stdout || "");
-        throw new Error(
-          "OpenCode review failed with exit " +
-            child.status +
-            (details ? ": " + details.slice(-4000) : "")
-        );
-      }
-
-      const review = capReview(stripAnsi(child.stdout || ""));
-      if (!review) throw new Error("OpenCode returned an empty Azure DevOps review");
-
-      const body = [
-        "## Pullfrog review",
-        "",
-        ...(diff.truncated
-          ? [
-              "> ⚠️ **Partial review:** the PR diff exceeded Pullfrog's context cap, so later changes were omitted.",
-              "",
-            ]
-          : []),
-        review,
-        "",
-        "---",
-        "Model: " +
-          model +
-          " · source: " +
-          ctx.sourceCommitId.slice(0, 12) +
-          " · merge base: " +
-          diff.mergeBase.slice(0, 12),
-      ].join("\n");
-
-      if (params.dryRun) {
-        console.log(body);
-        return;
-      }
-
-      const posted = await client.upsertReviewThread(body, ctx.sourceCommitId);
-      if (!posted.published) {
-        console.log(
-          "skipping Azure DevOps review publication: PR advanced from " +
-            ctx.sourceCommitId.slice(0, 12) +
-            " to " +
-            posted.supersededBy.slice(0, 12)
-        );
-        return;
-      }
-      console.log(
-        (posted.created ? "created" : "updated") +
-          " Azure DevOps PR review thread " +
-          posted.threadId
-      );
-    } finally {
-      if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
-      else process.env.PULLFROG_TEMP_DIR = priorTempDir;
-      rmSync(tempDir, { recursive: true, force: true });
+    if (params.dryRun) {
+      console.log(result.body);
+      return;
     }
+
+    const posted = result.publication;
+    if (!posted) throw new Error("review publication result is missing");
+    if (!posted.published) {
+      console.log(
+        "skipping Azure DevOps review publication: PR advanced from " +
+          result.pullRequest.source.sha.slice(0, 12) +
+          " to " +
+          posted.supersededBy.slice(0, 12)
+      );
+      return;
+    }
+
+    console.log(
+      (posted.created ? "created" : "updated") +
+        " Azure DevOps PR review thread " +
+        posted.id
+    );
   } finally {
     restoreAzureDevOpsAuth();
   }
