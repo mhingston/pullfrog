@@ -256,6 +256,19 @@ function remoteTrackingRef(branch: string): string {
   return "refs/remotes/origin/" + branch;
 }
 
+export function azureDevOpsSourcePushArgs(branch: string, expectedSha: string): string[] {
+  const validatedBranch = validateAzureDevOpsBranchName(branch);
+  const normalizedExpected = expectedSha.toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(normalizedExpected)) {
+    throw new Error("invalid Azure DevOps expected source commit for push: " + expectedSha);
+  }
+  const remoteRef = "refs/heads/" + validatedBranch;
+  return [
+    "--force-with-lease=" + remoteRef + ":" + normalizedExpected,
+    "HEAD:" + remoteRef,
+  ];
+}
+
 export function fetchAzureDevOpsBranch(params: {
   cwd: string;
   ctx: AzureDevOpsGitContext;
@@ -523,11 +536,12 @@ export async function commitAndPushAzureDevOpsSource(params: {
   // check above proves this is a fast-forward from `expected`; the lease adds
   // the stronger requirement that the remote ref is STILL exactly `expected`
   // at the instant the server accepts the update (including force-reset races).
-  const remoteRef = "refs/heads/" + branch;
-  authenticatedGit(params.cwd, params.ctx, "push", [
-    "--force-with-lease=" + remoteRef + ":" + expected,
-    "HEAD:" + remoteRef,
-  ]);
+  authenticatedGit(
+    params.cwd,
+    params.ctx,
+    "push",
+    azureDevOpsSourcePushArgs(branch, expected)
+  );
 
   return {
     branch,
