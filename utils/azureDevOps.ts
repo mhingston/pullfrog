@@ -346,7 +346,10 @@ export class AzureDevOpsClient {
   }
 
   async #listIterations(): Promise<AzureDevOpsIteration[]> {
-    return await this.#request<AzureDevOpsIteration[]>("/iterations?api-version=7.1");
+    const response = await this.#request<AzureDevOpsList<AzureDevOpsIteration>>(
+      "/iterations?api-version=7.1"
+    );
+    return response.value;
   }
 
   async #iterationForSource(sourceCommitId: string): Promise<AzureDevOpsIteration | undefined> {
@@ -653,6 +656,20 @@ export class AzureDevOpsClient {
     const after = this.#markedFindingThreads(await this.#listThreads());
     const liveAfter =
       (await this.#liveSourceCommitId()) ?? normalizedSourceCommitId;
+
+    // The head can advance while this run is creating/updating its own threads.
+    // In that race, neutralize only artifacts tagged with this run's source
+    // commit and stop. Never evaluate or patch newer-source threads using this
+    // run's stale desired findings.
+    if (liveAfter !== normalizedSourceCommitId) {
+      for (const entry of after) {
+        if (entry.sourceCommitId === normalizedSourceCommitId) {
+          await this.#setThreadStatus(entry.thread.id, 4);
+        }
+      }
+      return { published: false, supersededBy: liveAfter };
+    }
+
     const activeThreadIds: number[] = [];
 
     const grouped = new Map<string, typeof after>();
@@ -665,17 +682,14 @@ export class AzureDevOpsClient {
 
     for (const entry of after) {
       const isDesired =
-        entry.sourceCommitId === liveAfter && desired.has(entry.fingerprint);
+        entry.sourceCommitId === normalizedSourceCommitId &&
+        desired.has(entry.fingerprint);
       const group =
         grouped.get(entry.sourceCommitId + ":" + entry.fingerprint) ?? [];
       const canonical = group[0];
       const shouldBeActive = isDesired && canonical?.thread.id === entry.thread.id;
       await this.#setThreadStatus(entry.thread.id, shouldBeActive ? 1 : 4);
       if (shouldBeActive) activeThreadIds.push(entry.thread.id);
-    }
-
-    if (liveAfter !== normalizedSourceCommitId) {
-      return { published: false, supersededBy: liveAfter };
     }
 
     return {
