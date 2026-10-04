@@ -287,19 +287,16 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
         return;
       }
 
-      const currentPullRequest = await client.getPullRequest();
-      const currentSourceCommit = currentPullRequest.lastMergeSourceCommit?.commitId;
-      if (currentSourceCommit && currentSourceCommit !== ctx.sourceCommitId) {
+      const posted = await client.upsertReviewThread(body, ctx.sourceCommitId);
+      if (!posted.published) {
         console.log(
           "skipping Azure DevOps review publication: PR advanced from " +
             ctx.sourceCommitId.slice(0, 12) +
             " to " +
-            currentSourceCommit.slice(0, 12)
+            posted.supersededBy.slice(0, 12)
         );
         return;
       }
-
-      const posted = await client.upsertReviewThread(body);
       console.log(
         (posted.created ? "created" : "updated") +
           " Azure DevOps PR review thread " +
