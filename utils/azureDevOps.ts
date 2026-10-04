@@ -36,6 +36,7 @@ export interface AzureDevOpsContext {
   project: string;
   repositoryId: string;
   repositoryUri: string;
+  defaultBranch: string;
   pullRequestId: number;
   sourceBranch: string;
   sourceCommitId: string;
@@ -158,6 +159,9 @@ export function resolveAzureDevOpsContext(
   const project = required("SYSTEM_TEAMPROJECT", env.SYSTEM_TEAMPROJECT);
   const repositoryId = required("BUILD_REPOSITORY_ID", env.BUILD_REPOSITORY_ID);
   const repositoryUri = required("BUILD_REPOSITORY_URI", env.BUILD_REPOSITORY_URI);
+  const defaultBranch = stripRefsHeads(
+    required("BUILD_REPOSITORY_DEFAULTBRANCH", env.BUILD_REPOSITORY_DEFAULTBRANCH)
+  );
   const repositoryProvider = env.BUILD_REPOSITORY_PROVIDER?.trim();
   if (repositoryProvider && repositoryProvider !== "TfsGit") {
     throw new Error(
@@ -190,6 +194,7 @@ export function resolveAzureDevOpsContext(
     project,
     repositoryId,
     repositoryUri,
+    defaultBranch,
     pullRequestId,
     sourceBranch,
     sourceCommitId,
