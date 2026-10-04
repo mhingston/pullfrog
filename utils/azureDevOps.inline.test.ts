@@ -38,12 +38,15 @@ describe("AzureDevOpsClient review status", () => {
         return jsonResponse({ lastMergeSourceCommit: { commitId: sourceCommitId } });
       }
       if (url.endsWith("/pullRequests/42/iterations?api-version=7.1")) {
-        return jsonResponse([
-          {
-            id: 3,
-            sourceRefCommit: { commitId: sourceCommitId },
-          },
-        ]);
+        return jsonResponse({
+          count: 1,
+          value: [
+            {
+              id: 3,
+              sourceRefCommit: { commitId: sourceCommitId },
+            },
+          ],
+        });
       }
       if (url.endsWith("/pullRequests/42/statuses?api-version=7.1") && method === "POST") {
         postedBody = JSON.parse(String(init?.body));
@@ -117,9 +120,12 @@ describe("AzureDevOpsClient inline findings", () => {
         return jsonResponse({ lastMergeSourceCommit: { commitId: sourceCommitId } });
       }
       if (url.endsWith("/pullRequests/42/iterations?api-version=7.1")) {
-        return jsonResponse([
-          { id: 3, sourceRefCommit: { commitId: sourceCommitId } },
-        ]);
+        return jsonResponse({
+          count: 1,
+          value: [
+            { id: 3, sourceRefCommit: { commitId: sourceCommitId } },
+          ],
+        });
       }
       if (url.includes("/pullRequests/42/iterations/3/changes?")) {
         return jsonResponse({
@@ -208,9 +214,12 @@ describe("AzureDevOpsClient inline findings", () => {
         return jsonResponse({ lastMergeSourceCommit: { commitId: sourceCommitId } });
       }
       if (url.endsWith("/pullRequests/42/iterations?api-version=7.1")) {
-        return jsonResponse([
-          { id: 3, sourceRefCommit: { commitId: sourceCommitId } },
-        ]);
+        return jsonResponse({
+          count: 1,
+          value: [
+            { id: 3, sourceRefCommit: { commitId: sourceCommitId } },
+          ],
+        });
       }
       if (url.includes("/pullRequests/42/iterations/3/changes?")) {
         return jsonResponse({
@@ -258,6 +267,86 @@ describe("AzureDevOpsClient inline findings", () => {
     expect(statuses.get(11)).toBe(4);
   });
 
+  it("does not mutate newer-source threads when the head advances mid-publication", async () => {
+    const staleMarker = azureDevOpsFindingMarker(sourceCommitId, "src/a.ts", 12);
+    const newerMarker = azureDevOpsFindingMarker(newerCommitId, "src/b.ts", 7);
+    const threads = [
+      {
+        id: 10,
+        status: 1,
+        comments: [{ id: 20, content: "stale finding\n\n" + staleMarker }],
+      },
+      {
+        id: 11,
+        status: 1,
+        comments: [{ id: 21, content: "newer finding\n\n" + newerMarker }],
+      },
+    ];
+    const statuses = new Map<number, number>();
+    let liveChecks = 0;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.endsWith("/pullRequests/42?api-version=7.1")) {
+        liveChecks += 1;
+        return jsonResponse({
+          lastMergeSourceCommit: {
+            commitId: liveChecks === 1 ? sourceCommitId : newerCommitId,
+          },
+        });
+      }
+      if (url.endsWith("/pullRequests/42/iterations?api-version=7.1")) {
+        return jsonResponse({
+          count: 1,
+          value: [
+            { id: 3, sourceRefCommit: { commitId: sourceCommitId } },
+          ],
+        });
+      }
+      if (url.includes("/pullRequests/42/iterations/3/changes?")) {
+        return jsonResponse({
+          changeEntries: [
+            { changeTrackingId: 5, item: { path: "/src/a.ts" } },
+          ],
+          nextSkip: 0,
+          nextTop: 0,
+        });
+      }
+      if (url.endsWith("/pullRequests/42/threads?api-version=7.1") && method === "GET") {
+        return jsonResponse({ value: threads });
+      }
+      if (url.includes("/threads/10/comments/20?api-version=7.1") && method === "PATCH") {
+        const body = JSON.parse(String(init?.body));
+        threads[0]!.comments[0]!.content = body.content;
+        return jsonResponse({ id: 20 });
+      }
+      const threadMatch = url.match(/\/threads\/(\d+)\?api-version=7\.1$/);
+      if (threadMatch && method === "PATCH") {
+        const body = JSON.parse(String(init?.body));
+        statuses.set(Number(threadMatch[1]), body.status);
+        return jsonResponse({ id: Number(threadMatch[1]) });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
+    await expect(
+      client.upsertInlineReviewThreads(
+        [{ path: "src/a.ts", line: 12, body: "updated stale finding" }],
+        sourceCommitId
+      )
+    ).resolves.toEqual({
+      published: false,
+      supersededBy: newerCommitId,
+    });
+
+    expect(statuses.get(10)).toBe(4);
+    expect(statuses.has(11)).toBe(false);
+  });
+
   it("keeps locations in the summary when Azure cannot map the file", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -267,9 +356,12 @@ describe("AzureDevOpsClient inline findings", () => {
         return jsonResponse({ lastMergeSourceCommit: { commitId: sourceCommitId } });
       }
       if (url.endsWith("/pullRequests/42/iterations?api-version=7.1")) {
-        return jsonResponse([
-          { id: 3, sourceRefCommit: { commitId: sourceCommitId } },
-        ]);
+        return jsonResponse({
+          count: 1,
+          value: [
+            { id: 3, sourceRefCommit: { commitId: sourceCommitId } },
+          ],
+        });
       }
       if (url.includes("/pullRequests/42/iterations/3/changes?")) {
         return jsonResponse({ changeEntries: [], nextSkip: 0, nextTop: 0 });
