@@ -1,7 +1,12 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   AZDO_REVIEW_MARKER,
   AzureDevOpsClient,
   buildAzureDevOpsAuthorization,
+  buildAzureDevOpsPullRequestDiff,
   resolveAzureDevOpsContext,
   stripRefsHeads,
 } from "./azureDevOps.ts";
@@ -137,5 +142,62 @@ describe("AzureDevOpsClient.upsertReviewThread", () => {
     const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
     expect(body.comments[0].content).toContain(AZDO_REVIEW_MARKER);
     expect(body.status).toBe(1);
+  });
+});
+
+
+describe("buildAzureDevOpsPullRequestDiff", () => {
+  it("reviews the PR source commit rather than a synthetic validation merge HEAD", () => {
+    const root = mkdtempSync(join(tmpdir(), "pullfrog-azdo-test-"));
+    const remote = join(root, "remote.git");
+    const work = join(root, "work");
+
+    const git = (cwd: string, args: string[]): string =>
+      execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+
+    try {
+      execFileSync("git", ["init", "--bare", remote]);
+      mkdirSync(work);
+      git(work, ["init"]);
+      git(work, ["config", "user.email", "pullfrog@example.invalid"]);
+      git(work, ["config", "user.name", "Pullfrog Test"]);
+
+      writeFileSync(join(work, "base.txt"), "base\n");
+      git(work, ["add", "."]);
+      git(work, ["commit", "-m", "base"]);
+      git(work, ["branch", "-M", "main"]);
+      git(work, ["remote", "add", "origin", remote]);
+      git(work, ["push", "-u", "origin", "main"]);
+
+      git(work, ["checkout", "-b", "feature/azdo"]);
+      writeFileSync(join(work, "feature.txt"), "feature change\n");
+      git(work, ["add", "."]);
+      git(work, ["commit", "-m", "feature"]);
+      const sourceCommitId = git(work, ["rev-parse", "HEAD"]);
+      git(work, ["push", "-u", "origin", "feature/azdo"]);
+
+      git(work, ["checkout", "main"]);
+      writeFileSync(join(work, "target-only.txt"), "target moved\n");
+      git(work, ["add", "."]);
+      git(work, ["commit", "-m", "target moved"]);
+      git(work, ["push", "origin", "main"]);
+
+      git(work, ["checkout", "feature/azdo"]);
+      git(work, ["merge", "--no-edit", "main"]);
+
+      const result = buildAzureDevOpsPullRequestDiff({
+        cwd: work,
+        sourceBranch: "feature/azdo",
+        sourceCommitId,
+        targetBranch: "main",
+      });
+
+      expect(result.diff).toContain("feature.txt");
+      expect(result.diff).toContain("feature change");
+      expect(result.diff).not.toContain("target-only.txt");
+      expect(result.truncated).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
