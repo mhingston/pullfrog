@@ -152,93 +152,97 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
   const client = new AzureDevOpsClient(ctx);
   const pullRequest = await client.getPullRequest();
   const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
-  const model = resolveModel(params.model);
-  validateModelEnvironment(model);
-
-  const cwd = process.cwd();
-  const diff = buildAzureDevOpsPullRequestDiff({
-    cwd,
-    sourceBranch: ctx.sourceBranch,
-    sourceCommitId: ctx.sourceCommitId,
-    targetBranch: ctx.targetBranch,
-  });
-
-  const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-"));
-  const priorTempDir = process.env.PULLFROG_TEMP_DIR;
-  process.env.PULLFROG_TEMP_DIR = tempDir;
 
   try {
-    const diffPath = join(tempDir, "pull-request.diff");
-    writeFileSync(diffPath, diff.diff);
+    const model = resolveModel(params.model);
+    validateModelEnvironment(model);
 
-    const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
-    const prompt = reviewPrompt({
-      title: pullRequest.title,
-      description: pullRequest.description ?? "",
+    const cwd = process.cwd();
+    const diff = buildAzureDevOpsPullRequestDiff({
+      cwd,
       sourceBranch: ctx.sourceBranch,
+      sourceCommitId: ctx.sourceCommitId,
       targetBranch: ctx.targetBranch,
-      truncatedDiff: diff.truncated,
     });
 
-    const child = spawnSync(
-      cliPath,
-      ["run", "--model", model, "--file", diffPath, "--dir", tempDir, prompt],
-      {
-        cwd: tempDir,
-        encoding: "utf-8",
-        maxBuffer: 16 * 1024 * 1024,
-        env: {
-          ...process.env,
-          HOME: tempDir,
-          PWD: tempDir,
-          XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
-          XDG_DATA_HOME: join(tempDir, "xdg-data"),
-          OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
-          OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
-          OPENCODE_EXPERIMENTAL: "",
-          OPENCODE_EXPERIMENTAL_CODE_MODE: "",
-        },
-      }
-    );
+    const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-"));
+    const priorTempDir = process.env.PULLFROG_TEMP_DIR;
+    process.env.PULLFROG_TEMP_DIR = tempDir;
 
-    if (child.error) throw child.error;
-    if (child.status !== 0) {
-      const details = stripAnsi(child.stderr || child.stdout || "");
-      throw new Error(
-        "OpenCode review failed with exit " +
-          child.status +
-          (details ? ": " + details.slice(-4000) : "")
+    try {
+      const diffPath = join(tempDir, "pull-request.diff");
+      writeFileSync(diffPath, diff.diff);
+
+      const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
+      const prompt = reviewPrompt({
+        title: pullRequest.title,
+        description: pullRequest.description ?? "",
+        sourceBranch: ctx.sourceBranch,
+        targetBranch: ctx.targetBranch,
+        truncatedDiff: diff.truncated,
+      });
+
+      const child = spawnSync(
+        cliPath,
+        ["run", "--model", model, "--file", diffPath, "--dir", tempDir, prompt],
+        {
+          cwd: tempDir,
+          encoding: "utf-8",
+          maxBuffer: 16 * 1024 * 1024,
+          env: {
+            ...process.env,
+            HOME: tempDir,
+            PWD: tempDir,
+            XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
+            XDG_DATA_HOME: join(tempDir, "xdg-data"),
+            OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
+            OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
+            OPENCODE_EXPERIMENTAL: "",
+            OPENCODE_EXPERIMENTAL_CODE_MODE: "",
+          },
+        }
       );
+
+      if (child.error) throw child.error;
+      if (child.status !== 0) {
+        const details = stripAnsi(child.stderr || child.stdout || "");
+        throw new Error(
+          "OpenCode review failed with exit " +
+            child.status +
+            (details ? ": " + details.slice(-4000) : "")
+        );
+      }
+
+      const review = capReview(stripAnsi(child.stdout || ""));
+      if (!review) throw new Error("OpenCode returned an empty Azure DevOps review");
+
+      const body = [
+        "## Pullfrog review",
+        "",
+        review,
+        "",
+        "---",
+        "Model: " + model + " · merge base: " + diff.mergeBase.slice(0, 12),
+      ].join("\n");
+
+      if (params.dryRun) {
+        console.log(body);
+        return;
+      }
+
+      const posted = await client.upsertReviewThread(body);
+      console.log(
+        (posted.created ? "created" : "updated") +
+          " Azure DevOps PR review thread " +
+          posted.threadId
+      );
+    } finally {
+      if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
+      else process.env.PULLFROG_TEMP_DIR = priorTempDir;
+      rmSync(tempDir, { recursive: true, force: true });
     }
-
-    const review = capReview(stripAnsi(child.stdout || ""));
-    if (!review) throw new Error("OpenCode returned an empty Azure DevOps review");
-
-    const body = [
-      "## Pullfrog review",
-      "",
-      review,
-      "",
-      "---",
-      "Model: " + model + " · merge base: " + diff.mergeBase.slice(0, 12),
-    ].join("\n");
-
-    if (params.dryRun) {
-      console.log(body);
-      return;
-    }
-
-    const posted = await client.upsertReviewThread(body);
-    console.log(
-      (posted.created ? "created" : "updated") +
-        " Azure DevOps PR review thread " +
-        posted.threadId
-    );
   } finally {
     restoreAzureDevOpsAuth();
-    if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
-    else process.env.PULLFROG_TEMP_DIR = priorTempDir;
-    rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
