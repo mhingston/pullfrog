@@ -8,6 +8,7 @@ export type AzureDevOpsPushPermission = "disabled" | "restricted" | "enabled";
 export interface AzureDevOpsGitContext {
   collectionUri: string;
   repositoryUri: string;
+  defaultBranch: string;
   sourceBranch: string;
   sourceCommitId: string;
   targetBranch: string;
@@ -294,9 +295,16 @@ function assertPrSourceWriteAllowed(
 
   const source = validateAzureDevOpsBranchName(ctx.sourceBranch);
   const target = validateAzureDevOpsBranchName(ctx.targetBranch);
+  const defaultBranch = validateAzureDevOpsBranchName(ctx.defaultBranch);
   if (source === target) {
     throw new Error(
       "Azure DevOps write blocked: PR source branch is the same as the target branch"
+    );
+  }
+  if (source === defaultBranch) {
+    throw new Error(
+      "Azure DevOps write blocked: PR source branch is the repository default branch " +
+        defaultBranch
     );
   }
 
