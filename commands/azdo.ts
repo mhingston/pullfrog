@@ -677,23 +677,42 @@ async function runPollFollowUps(params: {
       (selected.length === 1 ? "" : "s")
   );
 
+  const failures: string[] = [];
   for (const candidate of selected) {
-    console.log(
-      "Azure DevOps follow-up candidate: PR " +
-        candidate.pullRequestId +
-        ", thread " +
-        candidate.threadId +
-        ", comment " +
-        candidate.commentId
+    const label =
+      "PR " +
+      candidate.pullRequestId +
+      ", thread " +
+      candidate.threadId +
+      ", comment " +
+      candidate.commentId;
+    console.log("Azure DevOps follow-up candidate: " + label);
+
+    try {
+      await runFollowUp({
+        model: params.model,
+        pullRequest: String(candidate.pullRequestId),
+        thread: String(candidate.threadId),
+        comment: String(candidate.commentId),
+        resolve: false,
+        dryRun: params.dryRun,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(label + ": " + message.slice(0, 500));
+      console.error("Azure DevOps follow-up failed for " + label + ": " + message);
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      "Azure DevOps follow-up polling failed for " +
+        failures.length +
+        " request" +
+        (failures.length === 1 ? "" : "s") +
+        ":\n- " +
+        failures.join("\n- ")
     );
-    await runFollowUp({
-      model: params.model,
-      pullRequest: String(candidate.pullRequestId),
-      thread: String(candidate.threadId),
-      comment: String(candidate.commentId),
-      resolve: false,
-      dryRun: params.dryRun,
-    });
   }
 }
 
