@@ -227,14 +227,14 @@ export class AzureDevOpsClient {
   }
 
   async #request<T>(path: string, init?: RequestInit): Promise<T> {
+    const headers = new Headers(init?.headers);
+    headers.set("Accept", "application/json");
+    headers.set("Authorization", this.#ctx.authorization);
+    if (init?.body) headers.set("Content-Type", "application/json");
+
     const response = await fetch(this.#url(path), {
       ...init,
-      headers: {
-        Accept: "application/json",
-        Authorization: this.#ctx.authorization,
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...(init?.headers ?? {}),
-      },
+      headers,
       signal: init?.signal ?? AbortSignal.timeout(30_000),
     });
 
