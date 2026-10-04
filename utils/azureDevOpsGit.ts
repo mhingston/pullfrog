@@ -176,9 +176,11 @@ export function scrubAzureDevOpsGitCredentials(cwd: string): void {
 
 function assertNoDangerousAuthenticatedGitConfig(cwd: string): void {
   const dangerous = [
+    ...localConfigKeys(cwd, "^include(if)?\\."),
     ...localConfigKeys(cwd, "^url\\..*\\.insteadof$"),
-    ...localConfigKeys(cwd, "^remote\\..*\\.(uploadpack|receivepack)$"),
-    ...localConfigKeys(cwd, "^core\\.(hookspath|sshcommand)$"),
+    ...localConfigKeys(cwd, "^http\\."),
+    ...localConfigKeys(cwd, "^remote\\..*\\.(uploadpack|receivepack|proxy)$"),
+    ...localConfigKeys(cwd, "^core\\.(hookspath|sshcommand|gitproxy|askpass)$"),
   ];
   if (dangerous.length > 0) {
     throw new Error(
