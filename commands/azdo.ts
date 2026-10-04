@@ -462,8 +462,21 @@ async function runFollowUp(params: {
     return;
   }
   if (selection.kind === "already-handled") {
+    const reconciled = await client.reconcileThreadFollowUp({
+      threadId,
+      triggerCommentId: commentId,
+      resolve: params.resolve,
+    });
+    if (!reconciled) {
+      console.log(
+        "Azure DevOps follow-up marker disappeared before reconciliation; rerun the command"
+      );
+      return;
+    }
     console.log(
-      "Azure DevOps follow-up already handled by comment " + selection.commentId
+      "Azure DevOps follow-up already handled by comment " +
+        reconciled.commentId +
+        (params.resolve ? "; thread resolved" : "")
     );
     return;
   }
