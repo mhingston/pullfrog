@@ -58,7 +58,7 @@ describe("AzureDevOpsRepositoryClient", () => {
 
     expect(results).toHaveLength(120);
     expect(results[0]?.pullRequestId).toBe(1);
-    expect(results.at(-1)?.pullRequestId).toBe(120);
+    expect(results[results.length - 1]?.pullRequestId).toBe(120);
     expect(calls).toHaveLength(2);
     expect(calls[0]).toContain("searchCriteria.status=active");
   });
