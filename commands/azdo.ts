@@ -21,6 +21,7 @@ import {
 import { runPullRequestReview } from "../providers/review.ts";
 import {
   AzureDevOpsClient,
+  AzureDevOpsRepositoryClient,
   buildAzureDevOpsPullRequestDiff,
   resolveAzureDevOpsContext,
   resolveAzureDevOpsRepositoryContext,
@@ -35,6 +36,12 @@ import {
   buildAzureFollowUpPrompt,
   selectAzureFollowUp,
 } from "./azdoFollowUp.ts";
+import {
+  parseAzureAllowedActorIds,
+  parseAzurePollAfter,
+  selectAzurePollingCandidates,
+  type AzurePollingCandidate,
+} from "./azdoPoll.ts";
 import {
   azureInlineFindings,
   azureReviewStatus,
@@ -57,6 +64,7 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("commands:");
   params.stream("  review       review the current Azure Repos pull request");
   params.stream("  follow-up    answer one explicit PR thread follow-up");
+  params.stream("  poll-follow-ups  scan active PRs for authorized follow-up requests");
   params.stream("  checkout     prepare the validated PR source branch for code-writing work");
   params.stream("  commit       commit and push current working-tree changes to the PR source branch");
   params.stream("");
@@ -67,6 +75,11 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("      --thread <id>             thread id (required for follow-up)");
   params.stream("      --comment <id>            triggering comment id (required for follow-up)");
   params.stream("      --resolve                 resolve the thread after posting the reply");
+  params.stream("");
+  params.stream("poll-follow-ups options:");
+  params.stream("      --after <iso-date>        rollout cutoff (or PULLFROG_AZDO_POLL_AFTER)");
+  params.stream("      --allowed-actor-ids <csv> immutable Azure identity IDs (or PULLFROG_AZDO_ALLOWED_ACTOR_IDS)");
+  params.stream("      --max <n>                 max model-backed follow-ups per poll, 1-50 (default 10)");
   params.stream("");
   params.stream("write options:");
   params.stream("      --push <mode>             disabled, restricted, or enabled (default: PULLFROG_PUSH or restricted)");
@@ -587,6 +600,103 @@ async function runFollowUp(params: {
   }
 }
 
+function parseAzurePollMax(raw: string | undefined): number {
+  const value = raw?.trim() || "10";
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 50) {
+    throw new Error("--max must be an integer between 1 and 50");
+  }
+  return parsed;
+}
+
+function sortAzurePollingCandidates(
+  candidates: AzurePollingCandidate[]
+): AzurePollingCandidate[] {
+  return [...candidates].sort((left, right) => {
+    const byTime = left.publishedAt.localeCompare(right.publishedAt);
+    if (byTime !== 0) return byTime;
+    if (left.pullRequestId !== right.pullRequestId) {
+      return left.pullRequestId - right.pullRequestId;
+    }
+    if (left.threadId !== right.threadId) return left.threadId - right.threadId;
+    return left.commentId - right.commentId;
+  });
+}
+
+async function runPollFollowUps(params: {
+  model: string | undefined;
+  after: string | undefined;
+  allowedActorIds: string | undefined;
+  max: string | undefined;
+  dryRun: boolean;
+}): Promise<void> {
+  const repository = resolveAzureDevOpsRepositoryContext();
+  const allowedActorIds = parseAzureAllowedActorIds(
+    params.allowedActorIds ?? process.env.PULLFROG_AZDO_ALLOWED_ACTOR_IDS
+  );
+  const after = parseAzurePollAfter(
+    params.after ?? process.env.PULLFROG_AZDO_POLL_AFTER
+  );
+  const max = parseAzurePollMax(params.max);
+
+  const repositoryClient = new AzureDevOpsRepositoryClient(repository);
+  const pullRequests = await repositoryClient.listActivePullRequests({ max: 500 });
+  const candidates: AzurePollingCandidate[] = [];
+
+  for (const pullRequest of pullRequests) {
+    const client = new AzureDevOpsClient({
+      ...repository,
+      pullRequestId: pullRequest.pullRequestId,
+    });
+    const threads = await client.listThreads();
+    candidates.push(
+      ...selectAzurePollingCandidates({
+        pullRequestId: pullRequest.pullRequestId,
+        threads,
+        allowedActorIds,
+        after,
+        // Gather broadly per PR, then enforce one global cap below.
+        max: 50,
+      })
+    );
+  }
+
+  const selected = sortAzurePollingCandidates(candidates).slice(0, max);
+  if (selected.length === 0) {
+    console.log(
+      "no authorized Azure DevOps follow-up requests found after " +
+        after.toISOString()
+    );
+    return;
+  }
+
+  console.log(
+    "processing " +
+      selected.length +
+      " authorized Azure DevOps follow-up request" +
+      (selected.length === 1 ? "" : "s")
+  );
+
+  for (const candidate of selected) {
+    console.log(
+      "Azure DevOps follow-up candidate: PR " +
+        candidate.pullRequestId +
+        ", thread " +
+        candidate.threadId +
+        ", comment " +
+        candidate.commentId
+    );
+    await runFollowUp({
+      model: params.model,
+      pullRequest: String(candidate.pullRequestId),
+      thread: String(candidate.threadId),
+      comment: String(candidate.commentId),
+      resolve: false,
+      dryRun: params.dryRun,
+    });
+  }
+}
+
 async function runCheckout(params: { push: string | undefined }): Promise<void> {
   const ctx = resolveAzureDevOpsContext();
   const permission = parseAzureDevOpsPushPermission(
@@ -663,6 +773,9 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       "--thread": String,
       "--comment": String,
       "--resolve": Boolean,
+      "--after": String,
+      "--allowed-actor-ids": String,
+      "--max": String,
       "-h": "--help",
       "-m": "--model",
     },
@@ -695,6 +808,17 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       thread: parsed["--thread"],
       comment: parsed["--comment"],
       resolve: parsed["--resolve"] === true,
+      dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  if (subcommand === "poll-follow-ups") {
+    await runPollFollowUps({
+      model: parsed["--model"],
+      after: parsed["--after"],
+      allowedActorIds: parsed["--allowed-actor-ids"],
+      max: parsed["--max"],
       dryRun: parsed["--dry-run"] === true,
     });
     return;
