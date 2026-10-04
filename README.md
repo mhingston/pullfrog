@@ -219,13 +219,67 @@ Configure these values as pipeline variables or a variable group, marking `AZURE
 
 The Azure runtime is deliberately narrower than the GitHub Action today:
 
-- automatic review is implemented, and separate safe-write primitives can prepare/commit the current PR source branch; autonomous autofix, issue triage, CI-log repair, interactive follow-ups, arbitrary branch/PR creation, and the Pullfrog cloud console remain GitHub-only;
+- automatic review and explicit thread follow-ups are implemented, and separate safe-write primitives can prepare/commit the current PR source branch; autonomous autofix, issue triage, CI-log repair, automatic comment-event transport, arbitrary branch/PR creation, and the Pullfrog cloud console remain GitHub-only;
 - it runs OpenCode in an isolated temporary workspace with all native tools denied and treats PR metadata/diff content as untrusted input;
 - it uses `System.AccessToken` by default; `AZURE_DEVOPS_PAT` is available as a local/debug fallback;
 - rerunning the validation updates the existing Pullfrog summary and same-location inline threads, and closes Pullfrog findings that disappeared;
 - `--dry-run` prints the review without writing to Azure DevOps, and `--model provider/model` can select a concrete OpenCode model that authenticates from pipeline environment variables instead of Azure OpenAI.
 
 For Azure Repos, grant the pipeline's build-service identity **Contribute to pull requests** on the repository. Keep `fetchDepth: 0` and `persistCredentials: true` for the current review step: Pullfrog compares `System.PullRequest.SourceCommitId` with the target branch rather than assuming the validation job's checked-out `HEAD` is the PR source commit. If you use the safe-write flow below, `azdo checkout` removes those persisted credentials before any code-writing process is allowed to touch the repository.
+
+### Interactive PR thread follow-ups
+
+The first interactive Azure slice deliberately avoids Service Hooks. A trusted user queues a pipeline with the exact **PR, thread, and triggering comment IDs**, and Pullfrog answers that request in the originating Azure Repos thread:
+
+```yaml
+parameters:
+  - name: pullRequestId
+    type: number
+  - name: threadId
+    type: number
+  - name: commentId
+    type: number
+
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+    persistCredentials: true
+
+  - script: >
+      npx --yes pullfrog azdo follow-up
+      --pull-request ${{ parameters.pullRequestId }}
+      --thread ${{ parameters.threadId }}
+      --comment ${{ parameters.commentId }}
+    displayName: Pullfrog PR follow-up
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      AZURE_API_KEY: $(AZURE_API_KEY)
+      AZURE_RESOURCE_NAME: $(AZURE_RESOURCE_NAME)
+      AZURE_DEPLOYMENT: $(AZURE_DEPLOYMENT)
+      AZURE_CONTEXT: $(AZURE_CONTEXT)
+      AZURE_MAX_OUTPUT: $(AZURE_MAX_OUTPUT)
+```
+
+The trigger is intentionally explicit:
+
+- a comment triggers when it contains `@pullfrog`;
+- a normal reply without a mention also triggers when it is inside a thread Pullfrog previously created for a review, inline finding, or follow-up;
+- deleted, system/code-change, and Pullfrog-authored marker comments are ignored;
+- `--resolve` closes the originating thread after the reply when that is explicitly requested by the queued run;
+- `--dry-run` prints the answer without posting it.
+
+Each reply carries a hidden marker keyed by **thread ID + triggering comment ID**. A retry first checks for that marker and reuses the existing comment. If two runs race and both create a reply, Pullfrog re-reads the thread, keeps the lowest matching comment ID, and deletes the later duplicate.
+
+This slice uses **pipeline queue permission as the authorization boundary**: writing `@pullfrog` in a PR does not itself authorize a run. Only users allowed to queue this follow-up pipeline (and, where applicable, set its queue-time parameters) can cause Pullfrog to process a selected comment. Restrict those Azure Pipeline permissions to the people/groups you intend to authorize. The build-service identity still needs repository permission to read and write PR comment threads.
+
+The model remains read-only and tool-free. Pullfrog captures the Azure REST credential, builds PR/thread/diff context, then scrubs `System.AccessToken` / PAT variables before starting OpenCode. Requests to modify code are answered as guidance only in this slice; they do not invoke the #6 write path or #7 autofix flow.
+
+This is an **ad-hoc/manual transport**, not full automatic comment-event parity. A later #5 slice can add polling or Service Hooks on top of the same PR/thread/comment ingestion and idempotency contract without changing the agent-facing semantics.
 
 ### Safe PR-source writes
 
@@ -277,7 +331,7 @@ Inline findings are only created when Pullfrog can validate the model's file/lin
 
 The Azure review path now runs through the same provider-neutral PR-review contract that can be implemented by GitHub: a small `PullRequestReader` + `ReviewPublisher` boundary and a normalized Pullfrog PR snapshot. Platform SDK/REST response types stay inside their adapters rather than leaking into review orchestration.
 
-Azure Pipelines build validation is also treated as the first Azure event adapter and normalized as a `validation` PR event. This does **not** add Service Hooks or a general webhook service: build validation is sufficient for automatic PR review, while interactive comment/follow-up parity remains a later capability that may require Service Hooks.
+Azure Pipelines build validation is treated as the automatic `validation` PR event adapter. Interactive follow-ups currently use an explicit PR/thread/comment pipeline invocation rather than a webhook. Service Hooks or polling can later supply automatic comment-event transport while reusing the same follow-up selection and idempotent reply path.
 
 The Azure token boundary is unchanged. The provider captures REST authorization before Pullfrog scrubs Azure DevOps credentials from the process environment; the isolated OpenCode subprocess still cannot access `System.AccessToken`, `AZURE_DEVOPS_TOKEN`, or `AZURE_DEVOPS_PAT`.
 
