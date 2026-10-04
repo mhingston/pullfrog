@@ -20,9 +20,18 @@ import {
 } from "../providers/azureDevOps.ts";
 import { runPullRequestReview } from "../providers/review.ts";
 import {
+  AzureDevOpsClient,
   buildAzureDevOpsPullRequestDiff,
   resolveAzureDevOpsContext,
 } from "../utils/azureDevOps.ts";
+import {
+  azureInlineFindings,
+  azureReviewStatus,
+  parseAzureStructuredReview,
+  renderAzureReviewMarkdown,
+  type AzureInlineFinding,
+  type AzureStructuredReview,
+} from "./azdoReview.ts";
 
 interface AzdoCliParams {
   args: string[];
@@ -125,12 +134,13 @@ function buildOpenCodeConfig(model: string): string {
   return JSON.stringify(config);
 }
 
-function capReview(markdown: string, maxChars = 60_000): string {
-  if (markdown.length <= maxChars) return markdown;
-  return (
-    markdown.slice(0, maxChars) +
-    "\n\n> Pullfrog truncated the generated review before posting it to Azure DevOps."
-  );
+function boundedReviewOutput(output: string, maxChars = 60_000): string {
+  if (output.length > maxChars) {
+    throw new Error(
+      "OpenCode structured review exceeded " + maxChars + " characters"
+    );
+  }
+  return output;
 }
 
 function reviewPrompt(params: {
@@ -151,14 +161,17 @@ function reviewPrompt(params: {
     "Target branch: " + params.targetBranch,
     "PR description: " + (params.description.trim() || "(none)"),
     params.truncatedDiff
-      ? "The attached diff was truncated for context size; call this out if omitted context prevents a confident finding."
+      ? "The diff is partial. Review only what is present; the caller will force an error status so this cannot become a green gate."
       : "",
     "",
-    "Focus on defects that could change runtime behavior: correctness, regressions, security, data loss, concurrency, " +
+    "Focus on actionable defects that could change runtime behavior: correctness, regressions, security, data loss, concurrency, " +
       "error handling, compatibility, and missing validation. Ignore style-only nits.",
-    "For each finding, give severity, file:line, evidence, impact, and the smallest useful fix.",
-    "Do not invent findings. If there are no actionable defects, respond exactly: ✅ No blocking issues found.",
-    "Return Markdown only and keep the review concise.",
+    "Return JSON only, with exactly this shape:",
+    '{"summary":"concise overall assessment","findings":[{"severity":"critical|high|medium|low","title":"short finding title","body":"evidence, impact, and smallest useful fix","path":"relative/file.ts","line":42}]}',
+    "Use an empty findings array when there are no actionable defects.",
+    "Only include path and line when you can identify a reliable RIGHT/new-file line in the supplied diff; otherwise omit both.",
+    "Use repository-relative paths without a leading slash. Line numbers are 1-based.",
+    "Emit at most one finding per file/line location and at most 50 findings.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -182,17 +195,38 @@ function scrubAzureDevOpsAuth(): () => void {
 async function runReview(params: { model: string | undefined; dryRun: boolean }): Promise<void> {
   const ctx = resolveAzureDevOpsContext();
   const event = azureDevOpsValidationEvent(ctx);
-  const provider = new AzureDevOpsPullRequestProvider(ctx);
+  const client = new AzureDevOpsClient(ctx);
+  const provider = new AzureDevOpsPullRequestProvider(ctx, client);
 
-  // The provider captures the Azure authorization in its private client before
-  // the environment is scrubbed. The model subprocess never receives Azure
-  // DevOps credentials, while publication can still happen after review.
+  // Both adapters capture Azure authorization before the environment is
+  // scrubbed. OpenCode never receives the Azure DevOps credential.
   const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
+
+  let structuredReview: AzureStructuredReview | undefined;
+  let inlineFindings: AzureInlineFinding[] = [];
+  let truncatedDiff = false;
 
   try {
     const model = resolveModel(params.model);
     validateModelEnvironment(model);
     const cwd = process.cwd();
+
+    if (!params.dryRun) {
+      const pending = await client.publishReviewStatus({
+        sourceCommitId: event.sourceSha,
+        state: "pending",
+        description: "Pullfrog is reviewing this PR.",
+      });
+      if (!pending.published) {
+        console.log(
+          "skipping Azure DevOps review: PR advanced from " +
+            event.sourceSha.slice(0, 12) +
+            " to " +
+            pending.supersededBy.slice(0, 12)
+        );
+        return;
+      }
+    }
 
     const result = await runPullRequestReview({
       provider,
@@ -204,6 +238,7 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
           sourceCommitId: event.sourceSha,
           targetBranch: ctx.targetBranch,
         });
+        truncatedDiff = diff.truncated;
 
         const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-"));
         const priorTempDir = process.env.PULLFROG_TEMP_DIR;
@@ -243,8 +278,6 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
             OPENCODE_EXPERIMENTAL: "false",
             OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
           };
-          // These selectors can point back into the checked-out repository and load
-          // untrusted plugins/MCP config outside the tool-permission boundary.
           delete childEnv.OPENCODE_CONFIG;
           delete childEnv.OPENCODE_CONFIG_DIR;
           delete childEnv.OPENCODE_TUI_CONFIG;
@@ -267,19 +300,16 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
             );
           }
 
-          const review = capReview(stripAnsi(child.stdout || ""));
-          if (!review) throw new Error("OpenCode returned an empty Azure DevOps review");
+          const raw = boundedReviewOutput(stripAnsi(child.stdout || ""));
+          if (!raw) throw new Error("OpenCode returned an empty Azure DevOps review");
+
+          structuredReview = parseAzureStructuredReview(raw);
+          inlineFindings = azureInlineFindings(structuredReview, diff.diff);
 
           return [
-            "## Pullfrog review",
-            "",
-            ...(diff.truncated
-              ? [
-                  "> ⚠️ **Partial review:** the PR diff exceeded Pullfrog's context cap, so later changes were omitted.",
-                  "",
-                ]
-              : []),
-            review,
+            renderAzureReviewMarkdown(structuredReview, {
+              truncatedDiff: diff.truncated,
+            }),
             "",
             "---",
             "Model: " +
@@ -314,11 +344,61 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
       return;
     }
 
+    const inline = await client.upsertInlineReviewThreads(
+      inlineFindings,
+      result.pullRequest.source.sha
+    );
+    if (!inline.published) {
+      console.log(
+        "skipping Azure DevOps inline/status publication: PR advanced to " +
+          inline.supersededBy.slice(0, 12)
+      );
+      return;
+    }
+
+    if (!structuredReview) {
+      throw new Error("structured review result is missing after successful review");
+    }
+    const status = azureReviewStatus(structuredReview, { truncatedDiff });
+    const statusPosted = await client.publishReviewStatus({
+      sourceCommitId: result.pullRequest.source.sha,
+      state: status.state,
+      description: status.description,
+    });
+    if (!statusPosted.published) {
+      console.log(
+        "skipping final Azure DevOps review status: PR advanced to " +
+          statusPosted.supersededBy.slice(0, 12)
+      );
+      return;
+    }
+
     console.log(
       (posted.created ? "created" : "updated") +
         " Azure DevOps PR review thread " +
-        posted.id
+        posted.id +
+        "; " +
+        inline.threadIds.length +
+        " inline finding(s); status " +
+        status.state +
+        (inline.skipped.length > 0
+          ? "; " + inline.skipped.length + " location(s) kept in summary only"
+          : "")
     );
+  } catch (error) {
+    if (!params.dryRun) {
+      try {
+        await client.publishReviewStatus({
+          sourceCommitId: event.sourceSha,
+          state: "error",
+          description: "Pullfrog review failed before a complete result was published.",
+        });
+      } catch {
+        // Preserve the original review failure; status publication is best effort
+        // when the review itself has already failed.
+      }
+    }
+    throw error;
   } finally {
     restoreAzureDevOpsAuth();
   }

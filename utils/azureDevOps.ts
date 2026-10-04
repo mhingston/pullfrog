@@ -1,9 +1,34 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 export const AZDO_REVIEW_MARKER_PREFIX = "<!-- pullfrog-azure-devops-review:";
+export const AZDO_FINDING_MARKER_PREFIX = "<!-- pullfrog-azure-devops-finding:";
+export const AZDO_STATUS_GENRE = "pullfrog";
+export const AZDO_STATUS_NAME = "review";
 
 export function azureDevOpsReviewMarker(sourceCommitId: string): string {
   return AZDO_REVIEW_MARKER_PREFIX + sourceCommitId.toLowerCase() + " -->";
+}
+
+function findingFingerprint(path: string, line: number): string {
+  return createHash("sha256")
+    .update(path.replace(/^\/+/, "") + ":" + line)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+export function azureDevOpsFindingMarker(
+  sourceCommitId: string,
+  path: string,
+  line: number
+): string {
+  return (
+    AZDO_FINDING_MARKER_PREFIX +
+    sourceCommitId.toLowerCase() +
+    ":" +
+    findingFingerprint(path, line) +
+    " -->"
+  );
 }
 
 export interface AzureDevOpsContext {
@@ -40,6 +65,48 @@ interface AzureDevOpsThread {
   isDeleted?: boolean | undefined;
   status?: number | string | undefined;
 }
+
+interface AzureDevOpsIteration {
+  id: number;
+  sourceRefCommit?: { commitId?: string | undefined } | undefined;
+}
+
+interface AzureDevOpsIterationChange {
+  changeTrackingId: number;
+  item?: { path?: string | undefined } | undefined;
+}
+
+interface AzureDevOpsIterationChanges {
+  changeEntries?: AzureDevOpsIterationChange[] | undefined;
+  nextSkip?: number | undefined;
+  nextTop?: number | undefined;
+}
+
+interface AzureDevOpsStatus {
+  id: number;
+  state?: string | undefined;
+}
+
+export type AzureDevOpsStatusState = "pending" | "succeeded" | "failed" | "error";
+
+export interface AzureDevOpsInlineFinding {
+  path: string;
+  line: number;
+  body: string;
+}
+
+export type AzureDevOpsStatusPublication =
+  | { published: true; statusId: number; iterationId: number }
+  | { published: false; supersededBy: string };
+
+export type AzureDevOpsInlinePublication =
+  | {
+      published: true;
+      iterationId: number;
+      threadIds: number[];
+      skipped: Array<{ path: string; line: number; reason: string }>;
+    }
+  | { published: false; supersededBy: string };
 
 export type AzureDevOpsReviewPublication =
   | { published: true; created: boolean; threadId: number }
@@ -278,6 +345,105 @@ export class AzureDevOpsClient {
     return await this.#request<AzureDevOpsPullRequest>("?api-version=7.1");
   }
 
+  async #listIterations(): Promise<AzureDevOpsIteration[]> {
+    const response = await this.#request<AzureDevOpsList<AzureDevOpsIteration>>(
+      "/iterations?api-version=7.1"
+    );
+    return response.value;
+  }
+
+  async #iterationForSource(sourceCommitId: string): Promise<AzureDevOpsIteration | undefined> {
+    const normalized = sourceCommitId.toLowerCase();
+    const iterations = await this.#listIterations();
+    return [...iterations]
+      .reverse()
+      .find(
+        (iteration) =>
+          iteration.sourceRefCommit?.commitId?.toLowerCase() === normalized
+      );
+  }
+
+  async #iterationChanges(iterationId: number): Promise<AzureDevOpsIterationChange[]> {
+    const changes: AzureDevOpsIterationChange[] = [];
+    let skip = 0;
+    let top = 2000;
+
+    for (let page = 0; page < 50; page += 1) {
+      const response = await this.#request<AzureDevOpsIterationChanges>(
+        "/iterations/" +
+          iterationId +
+          "/changes?$top=" +
+          top +
+          "&$skip=" +
+          skip +
+          "&api-version=7.1"
+      );
+      changes.push(...(response.changeEntries ?? []));
+
+      const nextSkip = response.nextSkip ?? 0;
+      const nextTop = response.nextTop ?? 0;
+      if (nextSkip <= 0 || nextTop <= 0) break;
+      skip = nextSkip;
+      top = Math.min(nextTop, 2000);
+    }
+
+    return changes;
+  }
+
+  async #publicationIteration(
+    sourceCommitId: string
+  ): Promise<{ iterationId: number } | { supersededBy: string }> {
+    const normalized = sourceCommitId.toLowerCase();
+    const live = await this.#liveSourceCommitId();
+    if (live && live !== normalized) return { supersededBy: live };
+
+    const iteration = await this.#iterationForSource(normalized);
+    if (!iteration) {
+      throw new Error(
+        "cannot find Azure DevOps PR iteration for source commit " + sourceCommitId
+      );
+    }
+    return { iterationId: iteration.id };
+  }
+
+  async publishReviewStatus(params: {
+    sourceCommitId: string;
+    state: AzureDevOpsStatusState;
+    description: string;
+  }): Promise<AzureDevOpsStatusPublication> {
+    const context = await this.#publicationIteration(params.sourceCommitId);
+    if ("supersededBy" in context) {
+      return { published: false, supersededBy: context.supersededBy };
+    }
+
+    const posted = await this.#request<AzureDevOpsStatus>("/statuses?api-version=7.1", {
+      method: "POST",
+      body: JSON.stringify({
+        iterationId: context.iterationId,
+        state: params.state,
+        description: params.description.slice(0, 256),
+        context: {
+          genre: AZDO_STATUS_GENRE,
+          name: AZDO_STATUS_NAME,
+        },
+      }),
+    });
+
+    // Statuses are iteration-scoped. If the head moved while the write was in
+    // flight, the old iteration status cannot represent the new source.
+    const liveAfter = await this.#liveSourceCommitId();
+    const normalized = params.sourceCommitId.toLowerCase();
+    if (liveAfter && liveAfter !== normalized) {
+      return { published: false, supersededBy: liveAfter };
+    }
+
+    return {
+      published: true,
+      statusId: posted.id,
+      iterationId: context.iterationId,
+    };
+  }
+
   async #listThreads(): Promise<AzureDevOpsThread[]> {
     const response = await this.#request<AzureDevOpsList<AzureDevOpsThread>>(
       "/threads?api-version=7.1"
@@ -313,6 +479,45 @@ export class AzureDevOpsClient {
     return marked.sort((left, right) => left.thread.id - right.thread.id);
   }
 
+  #findingMarker(comment: AzureDevOpsComment):
+    | { sourceCommitId: string; fingerprint: string }
+    | undefined {
+    if (comment.isDeleted || typeof comment.content !== "string") return undefined;
+    const match = comment.content.match(
+      /<!-- pullfrog-azure-devops-finding:([0-9a-f]{40}):([0-9a-f]{16}) -->/i
+    );
+    if (!match?.[1] || !match[2]) return undefined;
+    return {
+      sourceCommitId: match[1].toLowerCase(),
+      fingerprint: match[2].toLowerCase(),
+    };
+  }
+
+  #markedFindingThreads(threads: AzureDevOpsThread[]): Array<{
+    thread: AzureDevOpsThread;
+    comment: AzureDevOpsComment;
+    sourceCommitId: string;
+    fingerprint: string;
+  }> {
+    const marked: Array<{
+      thread: AzureDevOpsThread;
+      comment: AzureDevOpsComment;
+      sourceCommitId: string;
+      fingerprint: string;
+    }> = [];
+
+    for (const thread of threads) {
+      for (const comment of thread.comments ?? []) {
+        const marker = this.#findingMarker(comment);
+        if (!marker) continue;
+        marked.push({ thread, comment, ...marker });
+        break;
+      }
+    }
+
+    return marked.sort((left, right) => left.thread.id - right.thread.id);
+  }
+
   async #updateReviewComment(threadId: number, commentId: number, content: string): Promise<void> {
     await this.#request(
       "/threads/" + threadId + "/comments/" + commentId + "?api-version=7.1",
@@ -336,6 +541,163 @@ export class AzureDevOpsClient {
 
   async #liveSourceCommitId(): Promise<string | undefined> {
     return (await this.getPullRequest()).lastMergeSourceCommit?.commitId?.toLowerCase();
+  }
+
+  async upsertInlineReviewThreads(
+    findings: AzureDevOpsInlineFinding[],
+    sourceCommitId: string
+  ): Promise<AzureDevOpsInlinePublication> {
+    const normalizedSourceCommitId = sourceCommitId.toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(normalizedSourceCommitId)) {
+      throw new Error(
+        "invalid Azure DevOps source commit for inline review publication: " +
+          sourceCommitId
+      );
+    }
+
+    const context = await this.#publicationIteration(normalizedSourceCommitId);
+    if ("supersededBy" in context) {
+      return { published: false, supersededBy: context.supersededBy };
+    }
+
+    const changes = await this.#iterationChanges(context.iterationId);
+    const trackingByPath = new Map<string, number>();
+    for (const change of changes) {
+      const path = change.item?.path?.replace(/^\/+/, "");
+      if (path && Number.isInteger(change.changeTrackingId)) {
+        trackingByPath.set(path, change.changeTrackingId);
+      }
+    }
+
+    const before = this.#markedFindingThreads(await this.#listThreads());
+    const desired = new Map<
+      string,
+      { finding: AzureDevOpsInlineFinding; content: string; changeTrackingId: number }
+    >();
+    const skipped: Array<{ path: string; line: number; reason: string }> = [];
+
+    for (const finding of findings) {
+      const path = finding.path.replace(/^\/+/, "");
+      const changeTrackingId = trackingByPath.get(path);
+      if (changeTrackingId === undefined) {
+        skipped.push({
+          path,
+          line: finding.line,
+          reason: "file was not found in the cumulative Azure PR iteration changes",
+        });
+        continue;
+      }
+
+      const marker = azureDevOpsFindingMarker(
+        normalizedSourceCommitId,
+        path,
+        finding.line
+      );
+      const fingerprint = marker.match(/:([0-9a-f]{16}) -->$/i)?.[1];
+      if (!fingerprint) throw new Error("failed to build Azure finding marker");
+      desired.set(fingerprint, {
+        finding: { ...finding, path },
+        content: finding.body.trim() + "\n\n" + marker,
+        changeTrackingId,
+      });
+    }
+
+    for (const [fingerprint, entry] of desired) {
+      const existing = before.find(
+        (candidate) =>
+          candidate.sourceCommitId === normalizedSourceCommitId &&
+          candidate.fingerprint === fingerprint
+      );
+
+      if (existing) {
+        await this.#updateReviewComment(
+          existing.thread.id,
+          existing.comment.id,
+          entry.content
+        );
+        await this.#setThreadStatus(existing.thread.id, 1);
+        continue;
+      }
+
+      const position = { line: entry.finding.line, offset: 1 };
+      await this.#request<AzureDevOpsThread>("/threads?api-version=7.1", {
+        method: "POST",
+        body: JSON.stringify({
+          comments: [
+            {
+              parentCommentId: 0,
+              content: entry.content,
+              commentType: 1,
+            },
+          ],
+          status: 1,
+          threadContext: {
+            filePath: "/" + entry.finding.path,
+            leftFileStart: null,
+            leftFileEnd: null,
+            rightFileStart: position,
+            rightFileEnd: position,
+          },
+          pullRequestThreadContext: {
+            changeTrackingId: entry.changeTrackingId,
+            iterationContext: {
+              // Azure iteration zero is the common source/target commit; the
+              // model reviewed the cumulative PR diff against that base.
+              firstComparingIteration: 0,
+              secondComparingIteration: context.iterationId,
+            },
+          },
+        }),
+      });
+    }
+
+    // Re-list to converge concurrent same-location creates and close findings
+    // that disappeared on a rerun or belong to an older source iteration.
+    const after = this.#markedFindingThreads(await this.#listThreads());
+    const liveAfter =
+      (await this.#liveSourceCommitId()) ?? normalizedSourceCommitId;
+
+    // The head can advance while this run is creating/updating its own threads.
+    // In that race, neutralize only artifacts tagged with this run's source
+    // commit and stop. Never evaluate or patch newer-source threads using this
+    // run's stale desired findings.
+    if (liveAfter !== normalizedSourceCommitId) {
+      for (const entry of after) {
+        if (entry.sourceCommitId === normalizedSourceCommitId) {
+          await this.#setThreadStatus(entry.thread.id, 4);
+        }
+      }
+      return { published: false, supersededBy: liveAfter };
+    }
+
+    const activeThreadIds: number[] = [];
+
+    const grouped = new Map<string, typeof after>();
+    for (const entry of after) {
+      const key = entry.sourceCommitId + ":" + entry.fingerprint;
+      const group = grouped.get(key) ?? [];
+      group.push(entry);
+      grouped.set(key, group);
+    }
+
+    for (const entry of after) {
+      const isDesired =
+        entry.sourceCommitId === normalizedSourceCommitId &&
+        desired.has(entry.fingerprint);
+      const group =
+        grouped.get(entry.sourceCommitId + ":" + entry.fingerprint) ?? [];
+      const canonical = group[0];
+      const shouldBeActive = isDesired && canonical?.thread.id === entry.thread.id;
+      await this.#setThreadStatus(entry.thread.id, shouldBeActive ? 1 : 4);
+      if (shouldBeActive) activeThreadIds.push(entry.thread.id);
+    }
+
+    return {
+      published: true,
+      iterationId: context.iterationId,
+      threadIds: activeThreadIds.sort((a, b) => a - b),
+      skipped,
+    };
   }
 
   async upsertReviewThread(
