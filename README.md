@@ -181,7 +181,7 @@ Pass a JSON Schema via the `output_schema` input to make the agent's output requ
 
 ## Azure DevOps (experimental)
 
-Pullfrog can run as a read-only pull-request reviewer in **Azure Repos** from an **Azure Pipelines build-validation policy**. This path does not require a service hook, webhook, GitHub App, or separate Pullfrog deployment: the pipeline job supplies PR context through Azure's predefined variables, the agent reviews the source-commit diff, and Pullfrog publishes a summary, reliable inline findings, and an iteration-scoped PR status through the Azure DevOps REST API.
+Pullfrog can run as a pull-request reviewer in **Azure Repos** from an **Azure Pipelines build-validation policy**. This path does not require a service hook, webhook, GitHub App, or separate Pullfrog deployment: the pipeline job supplies PR context through Azure's predefined variables, the agent reviews the source-commit diff, and Pullfrog publishes a summary, reliable inline findings, and an iteration-scoped PR status through the Azure DevOps REST API.
 
 > Azure Repos does **not** use a YAML `pr:` trigger. Add the pipeline as a [**Build validation** policy](https://learn.microsoft.com/en-us/azure/devops/repos/git/branch-policies?view=azure-devops#set-build-validation) on the target branch instead. The `System.PullRequest.*` variables used by `pullfrog azdo review` are populated for those policy-triggered PR builds.
 
@@ -217,15 +217,48 @@ steps:
 
 Configure these values as pipeline variables or a variable group, marking `AZURE_API_KEY` secret. `AZURE_CONTEXT` and `AZURE_MAX_OUTPUT` are the context-window and maximum-output token counts for the model behind your deployment.
 
-The reviewer is deliberately narrower than the GitHub Action today:
+The Azure runtime is deliberately narrower than the GitHub Action today:
 
-- it supports Azure Repos PR **review** only; issue triage, autofix, pushes, CI-log repair, review-thread resolution, and the Pullfrog cloud console remain GitHub-only;
+- automatic review is implemented, and separate safe-write primitives can prepare/commit the current PR source branch; autonomous autofix, issue triage, CI-log repair, interactive follow-ups, arbitrary branch/PR creation, and the Pullfrog cloud console remain GitHub-only;
 - it runs OpenCode in an isolated temporary workspace with all native tools denied and treats PR metadata/diff content as untrusted input;
 - it uses `System.AccessToken` by default; `AZURE_DEVOPS_PAT` is available as a local/debug fallback;
 - rerunning the validation updates the existing Pullfrog summary and same-location inline threads, and closes Pullfrog findings that disappeared;
 - `--dry-run` prints the review without writing to Azure DevOps, and `--model provider/model` can select a concrete OpenCode model that authenticates from pipeline environment variables instead of Azure OpenAI.
 
-For Azure Repos, grant the pipeline's build-service identity **Contribute to pull requests** on the repository. Keep `fetchDepth: 0` and `persistCredentials: true`: Pullfrog compares `System.PullRequest.SourceCommitId` with the target branch rather than assuming the validation job's checked-out `HEAD` is the PR source commit.
+For Azure Repos, grant the pipeline's build-service identity **Contribute to pull requests** on the repository. Keep `fetchDepth: 0` and `persistCredentials: true` for the current review step: Pullfrog compares `System.PullRequest.SourceCommitId` with the target branch rather than assuming the validation job's checked-out `HEAD` is the PR source commit. If you use the safe-write flow below, `azdo checkout` removes those persisted credentials before any code-writing process is allowed to touch the repository.
+
+### Safe PR-source writes
+
+The first Azure write capability is intentionally narrow: it can prepare and finalize changes on the **current validated PR source branch only**. It does not yet create arbitrary branches or PRs, and it does not itself run a code-writing agent. That separation gives later autofix work a credential-safe substrate without granting the model direct repository credentials.
+
+A pipeline can bracket a trusted code-writing step like this:
+
+```yaml
+  # Run after the review step while System.AccessToken is still available only
+  # to Pullfrog itself.
+  - script: npx --yes pullfrog azdo checkout --push restricted
+    displayName: Prepare Pullfrog write checkout
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  # Your code-writing step goes here. Do NOT map System.AccessToken, an Azure
+  # DevOps PAT, or another repository credential into this process.
+  - script: ./run-your-code-writing-step.sh
+    displayName: Produce working-tree changes
+
+  - script: npx --yes pullfrog azdo commit --push restricted --message "fix: apply Pullfrog changes"
+    displayName: Commit and push Pullfrog changes
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+```
+
+`azdo checkout` verifies that `origin` is the Azure repository identified by `BUILD_REPOSITORY_URI`, fetches the PR source with parent-owned authentication, requires its remote tip to equal `System.PullRequest.SourceCommitId`, checks out that exact source commit, and removes checkout-persisted `http.*.extraheader` / credential-helper configuration.
+
+`azdo commit` then requires the working tree to still be on that PR source with the validated commit as `HEAD`, rechecks the live PR source through the Azure REST API, re-fetches the remote source, creates the commit itself, and performs a normal fast-forward push. It never force-pushes. A concurrent source update therefore fails closed instead of being overwritten.
+
+The write permission vocabulary matches Pullfrog's GitHub runtime: `disabled`, `restricted`, and `enabled`, defaulting to `restricted`. In this PR-source-only slice, both `restricted` and `enabled` authorize only the current PR source; neither permits a direct target/default-branch write. Authenticated git runs in an isolated environment with hooks disabled while credentials are live. Changed Git-LFS files are rejected for now because safely supporting them requires the LFS pre-push hook.
+
+Use `--dry-run` with `azdo commit` to run the stale/ref/change preflight without creating a commit or pushing.
 
 ### Merge-gating status
 
