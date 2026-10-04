@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  AZDO_REVIEW_MARKER,
+  azureDevOpsReviewMarker,
   AzureDevOpsClient,
   buildAzureDevOpsAuthorization,
   buildAzureDevOpsPullRequestDiff,
@@ -80,79 +80,134 @@ describe("Azure DevOps context", () => {
 });
 
 describe("AzureDevOpsClient.upsertReviewThread", () => {
+  const sourceCommitId = baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID;
+  const marker = azureDevOpsReviewMarker(sourceCommitId);
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("updates the existing Pullfrog review instead of duplicating it", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            value: [
-              {
-                id: 7,
-                comments: [{ id: 9, content: "old review\n\n" + AZDO_REVIEW_MARKER }],
-              },
-            ],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } }
-        )
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ id: 9 }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        })
-      );
+  function jsonResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("updates the existing current-source Pullfrog review instead of duplicating it", async () => {
+    const threads = [
+      {
+        id: 7,
+        status: 1,
+        comments: [{ id: 9, content: "old review\n\n" + marker }],
+      },
+    ];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.endsWith("/pullRequests/42?api-version=7.1")) {
+        return jsonResponse({ lastMergeSourceCommit: { commitId: sourceCommitId } });
+      }
+      if (url.endsWith("/pullRequests/42/threads?api-version=7.1") && method === "GET") {
+        return jsonResponse({ value: threads });
+      }
+      if (url.includes("/threads/7/comments/9?api-version=7.1") && method === "PATCH") {
+        const body = JSON.parse(String(init?.body));
+        threads[0]!.comments[0]!.content = body.content;
+        return jsonResponse({ id: 9 });
+      }
+      if (url.endsWith("/threads/7?api-version=7.1") && method === "PATCH") {
+        return jsonResponse({ id: 7 });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
-    await expect(client.upsertReviewThread("new review")).resolves.toEqual({
+    await expect(client.upsertReviewThread("new review", sourceCommitId)).resolves.toEqual({
+      published: true,
       created: false,
       threadId: 7,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[1][0]).toContain(
-      "/pullRequests/42/threads/7/comments/9?api-version=7.1"
-    );
-    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: "PATCH" });
-    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
-    expect(body.content).toContain("new review");
-    expect(body.content).toContain(AZDO_REVIEW_MARKER);
+    expect(threads[0]!.comments[0]!.content).toContain("new review");
+    expect(threads[0]!.comments[0]!.content).toContain(marker);
   });
 
-  it("creates a general PR thread when no Pullfrog review exists", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ value: [] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        })
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ id: 11 }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        })
-      );
+  it("skips publication when the PR has advanced to a newer source commit", async () => {
+    const newer = "fedcba9876543210fedcba9876543210fedcba98";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/pullRequests/42?api-version=7.1")) {
+        return jsonResponse({ lastMergeSourceCommit: { commitId: newer } });
+      }
+      throw new Error("unexpected request: " + url);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
-    await expect(client.upsertReviewThread("review body")).resolves.toEqual({
-      created: true,
+    await expect(client.upsertReviewThread("stale review", sourceCommitId)).resolves.toEqual({
+      published: false,
+      supersededBy: newer,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("converges same-source duplicate threads onto the lowest thread id", async () => {
+    const threads = [
+      {
+        id: 11,
+        status: 1,
+        comments: [{ id: 21, content: "review A\n\n" + marker }],
+      },
+      {
+        id: 12,
+        status: 1,
+        comments: [{ id: 22, content: "review B\n\n" + marker }],
+      },
+    ];
+    const statuses = new Map<number, number>();
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.endsWith("/pullRequests/42?api-version=7.1")) {
+        return jsonResponse({ lastMergeSourceCommit: { commitId: sourceCommitId } });
+      }
+      if (url.endsWith("/pullRequests/42/threads?api-version=7.1") && method === "GET") {
+        return jsonResponse({ value: threads });
+      }
+      const commentMatch = url.match(/\/threads\/(\d+)\/comments\/(\d+)\?api-version=7\.1$/);
+      if (commentMatch && method === "PATCH") {
+        const thread = threads.find((candidate) => candidate.id === Number(commentMatch[1]));
+        if (!thread) throw new Error("unknown thread");
+        const body = JSON.parse(String(init?.body));
+        thread.comments[0]!.content = body.content;
+        return jsonResponse({ id: Number(commentMatch[2]) });
+      }
+      const threadMatch = url.match(/\/threads\/(\d+)\?api-version=7\.1$/);
+      if (threadMatch && method === "PATCH") {
+        const body = JSON.parse(String(init?.body));
+        statuses.set(Number(threadMatch[1]), body.status);
+        return jsonResponse({ id: Number(threadMatch[1]) });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
+    await expect(client.upsertReviewThread("canonical review", sourceCommitId)).resolves.toEqual({
+      published: true,
+      created: false,
       threadId: 11,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[1][0]).toContain("/pullRequests/42/threads?api-version=7.1");
-    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: "POST" });
-    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
-    expect(body.comments[0].content).toContain(AZDO_REVIEW_MARKER);
-    expect(body.status).toBe(1);
+    expect(statuses.get(11)).toBe(1);
+    expect(statuses.get(12)).toBe(4);
+    expect(threads[0]!.comments[0]!.content).toContain("canonical review");
   });
 });
 
