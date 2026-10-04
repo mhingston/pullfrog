@@ -183,11 +183,11 @@ Pass a JSON Schema via the `output_schema` input to make the agent's output requ
 
 Pullfrog can run as a read-only pull-request reviewer in **Azure Repos** from an **Azure Pipelines build-validation policy**. This path does not require a service hook, webhook, GitHub App, or separate Pullfrog deployment: the pipeline job supplies PR context through Azure's predefined variables, the agent reviews the source-commit diff, and Pullfrog creates or updates one PR comment thread through the Azure DevOps REST API.
 
-> Azure Repos does **not** use a YAML \`pr:\` trigger. Add the pipeline as a **Build validation** policy on the target branch instead. The \`System.PullRequest.*\` variables used by \`pullfrog azdo review\` are populated for those policy-triggered PR builds.
+> Azure Repos does **not** use a YAML `pr:` trigger. Add the pipeline as a **Build validation** policy on the target branch instead. The `System.PullRequest.*` variables used by `pullfrog azdo review` are populated for those policy-triggered PR builds.
 
 A minimal Azure OpenAI setup:
 
-\`\`\`yaml
+```yaml
 trigger: none
 
 pool:
@@ -213,17 +213,17 @@ steps:
       AZURE_MAX_OUTPUT: $(AZURE_MAX_OUTPUT)
       # Optional for deployments that require Chat Completions rather than Responses:
       # AZURE_USE_CHAT_COMPLETIONS: "true"
-\`\`\`
+```
 
-Configure these values as pipeline variables or a variable group, marking \`AZURE_API_KEY\` secret. \`AZURE_CONTEXT\` and \`AZURE_MAX_OUTPUT\` are the context-window and maximum-output token counts for the model behind your deployment.
+Configure these values as pipeline variables or a variable group, marking `AZURE_API_KEY` secret. `AZURE_CONTEXT` and `AZURE_MAX_OUTPUT` are the context-window and maximum-output token counts for the model behind your deployment.
 
 The reviewer is deliberately narrower than the GitHub Action today:
 
 - it supports Azure Repos PR **review** only; issue triage, autofix, pushes, CI-log repair, review-thread resolution, and the Pullfrog cloud console remain GitHub-only;
 - it runs OpenCode with mutating/execution tools denied and treats PR metadata/diff content as untrusted input;
-- it uses \`System.AccessToken\` by default; \`AZURE_DEVOPS_PAT\` is available as a local/debug fallback;
+- it uses `System.AccessToken` by default; `AZURE_DEVOPS_PAT` is available as a local/debug fallback;
 - rerunning the validation updates the existing Pullfrog review thread instead of adding another one;
-- \`--dry-run\` prints the review without writing to Azure DevOps, and \`--model provider/model\` can select any OpenCode-supported provider instead of Azure OpenAI.
+- `--dry-run` prints the review without writing to Azure DevOps, and `--model provider/model` can select any OpenCode-supported provider instead of Azure OpenAI.
 
-For Azure Repos, grant the pipeline's build-service identity **Contribute to pull requests** on the repository. Keep \`fetchDepth: 0\` and \`persistCredentials: true\`: Pullfrog compares \`System.PullRequest.SourceCommitId\` with the target branch rather than assuming the validation job's checked-out \`HEAD\` is the PR source commit.
+For Azure Repos, grant the pipeline's build-service identity **Contribute to pull requests** on the repository. Keep `fetchDepth: 0` and `persistCredentials: true`: Pullfrog compares `System.PullRequest.SourceCommitId` with the target branch rather than assuming the validation job's checked-out `HEAD` is the PR source commit.
 
