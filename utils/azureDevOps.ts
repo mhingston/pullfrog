@@ -1,6 +1,10 @@
 import { execFileSync } from "node:child_process";
 
-export const AZDO_REVIEW_MARKER = "<!-- pullfrog-azure-devops-review -->";
+export const AZDO_REVIEW_MARKER_PREFIX = "<!-- pullfrog-azure-devops-review:";
+
+export function azureDevOpsReviewMarker(sourceCommitId: string): string {
+  return AZDO_REVIEW_MARKER_PREFIX + sourceCommitId.toLowerCase() + " -->";
+}
 
 export interface AzureDevOpsContext {
   collectionUri: string;
@@ -20,6 +24,7 @@ interface AzureDevOpsPullRequest {
   sourceRefName: string;
   targetRefName: string;
   createdBy?: { displayName?: string | undefined } | undefined;
+  lastMergeSourceCommit?: { commitId?: string | undefined } | undefined;
   url?: string | undefined;
 }
 
@@ -33,7 +38,12 @@ interface AzureDevOpsThread {
   id: number;
   comments?: AzureDevOpsComment[] | undefined;
   isDeleted?: boolean | undefined;
+  status?: number | string | undefined;
 }
+
+export type AzureDevOpsReviewPublication =
+  | { published: true; created: boolean; threadId: number }
+  | { published: false; supersededBy: string };
 
 interface AzureDevOpsList<T> {
   value: T[];
@@ -268,50 +278,143 @@ export class AzureDevOpsClient {
     return await this.#request<AzureDevOpsPullRequest>("?api-version=7.1");
   }
 
-  async upsertReviewThread(markdown: string): Promise<{ created: boolean; threadId: number }> {
-    const content = markdown.trim() + "\n\n" + AZDO_REVIEW_MARKER;
-    const threads = await this.#request<AzureDevOpsList<AzureDevOpsThread>>(
+  async #listThreads(): Promise<AzureDevOpsThread[]> {
+    const response = await this.#request<AzureDevOpsList<AzureDevOpsThread>>(
       "/threads?api-version=7.1"
     );
+    return response.value.filter((thread) => !thread.isDeleted);
+  }
 
-    for (const thread of threads.value) {
-      if (thread.isDeleted) continue;
-      const comment = thread.comments?.find(
-        (candidate) =>
-          !candidate.isDeleted &&
-          typeof candidate.content === "string" &&
-          candidate.content.includes(AZDO_REVIEW_MARKER)
-      );
+  #reviewMarker(comment: AzureDevOpsComment): string | undefined {
+    if (comment.isDeleted || typeof comment.content !== "string") return undefined;
+    const match = comment.content.match(
+      /<!-- pullfrog-azure-devops-review:([0-9a-f]{40}) -->/i
+    );
+    return match?.[1]?.toLowerCase();
+  }
+
+  #markedThreads(threads: AzureDevOpsThread[]): Array<{
+    thread: AzureDevOpsThread;
+    comment: AzureDevOpsComment;
+    sourceCommitId: string;
+  }> {
+    const marked: Array<{
+      thread: AzureDevOpsThread;
+      comment: AzureDevOpsComment;
+      sourceCommitId: string;
+    }> = [];
+    for (const thread of threads) {
+      const comment = thread.comments?.find((candidate) => this.#reviewMarker(candidate));
       if (!comment) continue;
+      const sourceCommitId = this.#reviewMarker(comment);
+      if (!sourceCommitId) continue;
+      marked.push({ thread, comment, sourceCommitId });
+    }
+    return marked.sort((left, right) => left.thread.id - right.thread.id);
+  }
 
-      await this.#request(
-        "/threads/" + thread.id + "/comments/" + comment.id + "?api-version=7.1",
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            id: comment.id,
-            content,
-            commentType: 1,
-          }),
-        }
-      );
-      return { created: false, threadId: thread.id };
+  async #updateReviewComment(threadId: number, commentId: number, content: string): Promise<void> {
+    await this.#request(
+      "/threads/" + threadId + "/comments/" + commentId + "?api-version=7.1",
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          id: commentId,
+          content,
+          commentType: 1,
+        }),
+      }
+    );
+  }
+
+  async #setThreadStatus(threadId: number, status: 1 | 4): Promise<void> {
+    await this.#request("/threads/" + threadId + "?api-version=7.1", {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  async #liveSourceCommitId(): Promise<string | undefined> {
+    return (await this.getPullRequest()).lastMergeSourceCommit?.commitId?.toLowerCase();
+  }
+
+  async upsertReviewThread(
+    markdown: string,
+    sourceCommitId: string
+  ): Promise<AzureDevOpsReviewPublication> {
+    const normalizedSourceCommitId = sourceCommitId.toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(normalizedSourceCommitId)) {
+      throw new Error("invalid Azure DevOps source commit for review publication: " + sourceCommitId);
     }
 
-    const created = await this.#request<AzureDevOpsThread>("/threads?api-version=7.1", {
-      method: "POST",
-      body: JSON.stringify({
-        comments: [
-          {
-            parentCommentId: 0,
-            content,
-            commentType: 1,
-          },
-        ],
-        status: 1,
-      }),
-    });
+    // A validation job may finish after a newer PR iteration. Never let that
+    // older run replace the review for the current source commit.
+    const liveBefore = await this.#liveSourceCommitId();
+    if (liveBefore && liveBefore !== normalizedSourceCommitId) {
+      return { published: false, supersededBy: liveBefore };
+    }
 
-    return { created: true, threadId: created.id };
+    const marker = azureDevOpsReviewMarker(normalizedSourceCommitId);
+    const content = markdown.trim() + "\n\n" + marker;
+    const before = this.#markedThreads(await this.#listThreads()).filter(
+      (entry) => entry.sourceCommitId === normalizedSourceCommitId
+    );
+
+    let created = false;
+    let candidateThreadId: number;
+
+    if (before.length > 0) {
+      const canonical = before[0]!;
+      await this.#updateReviewComment(canonical.thread.id, canonical.comment.id, content);
+      await this.#setThreadStatus(canonical.thread.id, 1);
+      candidateThreadId = canonical.thread.id;
+    } else {
+      const posted = await this.#request<AzureDevOpsThread>("/threads?api-version=7.1", {
+        method: "POST",
+        body: JSON.stringify({
+          comments: [
+            {
+              parentCommentId: 0,
+              content,
+              commentType: 1,
+            },
+          ],
+          status: 1,
+        }),
+      });
+      created = true;
+      candidateThreadId = posted.id;
+    }
+
+    // POST is not conditional, so two overlapping jobs can both create a
+    // thread. Re-list after the write, choose the lowest ID as the stable
+    // canonical thread for the current source commit, and close duplicates.
+    const after = this.#markedThreads(await this.#listThreads());
+    const liveAfter = (await this.#liveSourceCommitId()) ?? normalizedSourceCommitId;
+    const liveThreads = after.filter((entry) => entry.sourceCommitId === liveAfter);
+    const canonicalLive = liveThreads[0];
+
+    for (const entry of after) {
+      const shouldBeActive =
+        entry.sourceCommitId === liveAfter && entry.thread.id === canonicalLive?.thread.id;
+      await this.#setThreadStatus(entry.thread.id, shouldBeActive ? 1 : 4);
+    }
+
+    if (liveAfter !== normalizedSourceCommitId) {
+      return { published: false, supersededBy: liveAfter };
+    }
+
+    // Another same-commit job may have won the create race with a lower ID.
+    // Put this run's content on that canonical thread and return its ID.
+    if (canonicalLive && canonicalLive.thread.id !== candidateThreadId) {
+      await this.#updateReviewComment(
+        canonicalLive.thread.id,
+        canonicalLive.comment.id,
+        content
+      );
+      candidateThreadId = canonicalLive.thread.id;
+    }
+
+    return { published: true, created, threadId: candidateThreadId };
   }
 }
