@@ -35,6 +35,8 @@ export interface AzureDevOpsContext {
   collectionUri: string;
   project: string;
   repositoryId: string;
+  repositoryUri: string;
+  defaultBranch: string;
   pullRequestId: number;
   sourceBranch: string;
   sourceCommitId: string;
@@ -156,6 +158,10 @@ export function resolveAzureDevOpsContext(
   ).replace(/\/*$/, "/");
   const project = required("SYSTEM_TEAMPROJECT", env.SYSTEM_TEAMPROJECT);
   const repositoryId = required("BUILD_REPOSITORY_ID", env.BUILD_REPOSITORY_ID);
+  const repositoryUri = required("BUILD_REPOSITORY_URI", env.BUILD_REPOSITORY_URI);
+  const defaultBranch = stripRefsHeads(
+    required("BUILD_REPOSITORY_DEFAULTBRANCH", env.BUILD_REPOSITORY_DEFAULTBRANCH)
+  );
   const repositoryProvider = env.BUILD_REPOSITORY_PROVIDER?.trim();
   if (repositoryProvider && repositoryProvider !== "TfsGit") {
     throw new Error(
@@ -187,6 +193,8 @@ export function resolveAzureDevOpsContext(
     collectionUri,
     project,
     repositoryId,
+    repositoryUri,
+    defaultBranch,
     pullRequestId,
     sourceBranch,
     sourceCommitId,
@@ -394,7 +402,7 @@ export class AzureDevOpsClient {
     sourceCommitId: string
   ): Promise<{ iterationId: number } | { supersededBy: string }> {
     const normalized = sourceCommitId.toLowerCase();
-    const live = await this.#liveSourceCommitId();
+    const live = await this.getLiveSourceCommitId();
     if (live && live !== normalized) return { supersededBy: live };
 
     const iteration = await this.#iterationForSource(normalized);
@@ -431,7 +439,7 @@ export class AzureDevOpsClient {
 
     // Statuses are iteration-scoped. If the head moved while the write was in
     // flight, the old iteration status cannot represent the new source.
-    const liveAfter = await this.#liveSourceCommitId();
+    const liveAfter = await this.getLiveSourceCommitId();
     const normalized = params.sourceCommitId.toLowerCase();
     if (liveAfter && liveAfter !== normalized) {
       return { published: false, supersededBy: liveAfter };
@@ -539,7 +547,7 @@ export class AzureDevOpsClient {
     });
   }
 
-  async #liveSourceCommitId(): Promise<string | undefined> {
+  async getLiveSourceCommitId(): Promise<string | undefined> {
     return (await this.getPullRequest()).lastMergeSourceCommit?.commitId?.toLowerCase();
   }
 
@@ -655,7 +663,7 @@ export class AzureDevOpsClient {
     // that disappeared on a rerun or belong to an older source iteration.
     const after = this.#markedFindingThreads(await this.#listThreads());
     const liveAfter =
-      (await this.#liveSourceCommitId()) ?? normalizedSourceCommitId;
+      (await this.getLiveSourceCommitId()) ?? normalizedSourceCommitId;
 
     // The head can advance while this run is creating/updating its own threads.
     // In that race, neutralize only artifacts tagged with this run's source
@@ -711,7 +719,7 @@ export class AzureDevOpsClient {
 
     // A validation job may finish after a newer PR iteration. Never let that
     // older run replace the review for the current source commit.
-    const liveBefore = await this.#liveSourceCommitId();
+    const liveBefore = await this.getLiveSourceCommitId();
     if (liveBefore && liveBefore !== normalizedSourceCommitId) {
       return { published: false, supersededBy: liveBefore };
     }
@@ -752,7 +760,7 @@ export class AzureDevOpsClient {
     // thread. Re-list after the write, choose the lowest ID as the stable
     // canonical thread for the current source commit, and close duplicates.
     const after = this.#markedThreads(await this.#listThreads());
-    const liveAfter = (await this.#liveSourceCommitId()) ?? normalizedSourceCommitId;
+    const liveAfter = (await this.getLiveSourceCommitId()) ?? normalizedSourceCommitId;
     const liveThreads = after.filter((entry) => entry.sourceCommitId === liveAfter);
     const canonicalLive = liveThreads[0];
 

@@ -10,6 +10,8 @@ const baseEnv = {
   SYSTEM_TEAMFOUNDATIONCOLLECTIONURI: "https://dev.azure.com/acme",
   SYSTEM_TEAMPROJECT: "Platform",
   BUILD_REPOSITORY_ID: "repo-guid",
+  BUILD_REPOSITORY_URI: "https://dev.azure.com/acme/Platform/_git/widget",
+  BUILD_REPOSITORY_DEFAULTBRANCH: "refs/heads/main",
   BUILD_REPOSITORY_PROVIDER: "TfsGit",
   SYSTEM_PULLREQUEST_PULLREQUESTID: "42",
   SYSTEM_PULLREQUEST_SOURCEBRANCH: "refs/heads/feature/azdo",
