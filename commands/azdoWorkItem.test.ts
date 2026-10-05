@@ -470,3 +470,43 @@ describe("Azure work-item polling", () => {
     ]);
   });
 });
+
+
+describe("Azure work-item model output extraction", () => {
+  const policy = {
+    tags: true,
+    state: false,
+    allowedStates: new Set<string>(),
+  };
+
+  it("accepts narration followed by a fenced final JSON answer", () => {
+    expect(
+      parseAzureWorkItemModelResult(
+        [
+          "I will inspect the repository first.",
+          "```json",
+          JSON.stringify({
+            response: "Use the existing cache invalidation path.",
+            addTags: ["backend"],
+            removeTags: [],
+          }),
+          "```",
+        ].join("\n"),
+        policy
+      )
+    ).toMatchObject({
+      response: "Use the existing cache invalidation path.",
+      addTags: ["backend"],
+      removeTags: [],
+    });
+  });
+
+  it("accepts a final bare JSON object after narration", () => {
+    expect(
+      parseAzureWorkItemModelResult(
+        'Looked at the code.\n{"response":"Done","addTags":[],"removeTags":[]}',
+        policy
+      )
+    ).toMatchObject({ response: "Done" });
+  });
+});
