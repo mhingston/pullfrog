@@ -199,6 +199,27 @@ describe("AzureDevOpsBoardsProvider allowlisted writes", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects arbitrary field mutation shapes at runtime", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(rawWorkItem()))
+    );
+    const provider = new AzureDevOpsBoardsProvider(ctx);
+    await expect(
+      provider.updateWorkItem({
+        id: 42,
+        expectedRevision: 7,
+        mutations: [
+          {
+            kind: "field",
+            referenceName: "System.Priority",
+            value: 1,
+          } as any,
+        ],
+      })
+    ).rejects.toThrow("unsupported mutation kind");
+  });
+
   it("validates generated hyperlinks rather than exposing arbitrary relation patches", async () => {
     vi.stubGlobal(
       "fetch",
