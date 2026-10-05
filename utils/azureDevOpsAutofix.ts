@@ -65,9 +65,16 @@ export function selectAzureCiRepairEligibility(params: {
   settings: AzureCiAutofixSettings;
 }): AzureCiRepairEligibility {
   if (params.pullfrogOwned) {
-    return params.settings.ownPrs
-      ? { eligible: true, class: "own" }
-      : { eligible: false, reason: "own-pr-fixes-disabled" };
+    if (!params.settings.ownPrs) {
+      return { eligible: false, reason: "own-pr-fixes-disabled" };
+    }
+    // Ownership refs are coordination/provenance markers, not an authorization
+    // boundary: repository users who can create refs could forge one. Require
+    // the same exact-source trusted review proof before any automatic write.
+    if (!params.reviewedAtSource) {
+      return { eligible: false, reason: "not-pullfrog-reviewed" };
+    }
+    return { eligible: true, class: "own" };
   }
   if (!params.settings.reviewedPrs) {
     return { eligible: false, reason: "reviewed-pr-fixes-disabled" };
