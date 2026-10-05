@@ -2310,6 +2310,10 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       "--resolve": Boolean,
       "--after": String,
       "--allowed-actor-ids": String,
+      "--work-item": String,
+      "--mode": String,
+      "--allowed-fields": String,
+      "--allowed-states": String,
       "--max": String,
       "-h": "--help",
       "-m": "--model",
@@ -2354,6 +2358,36 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       after: parsed["--after"],
       allowedActorIds: parsed["--allowed-actor-ids"],
       max: parsed["--max"],
+      dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  if (subcommand === "work-item") {
+    await runWorkItem({
+      model: parsed["--model"],
+      workItem: parsed["--work-item"],
+      comment: parsed["--comment"],
+      mode: parsed["--mode"],
+      allowedActorIds: parsed["--allowed-actor-ids"],
+      allowedFields: parsed["--allowed-fields"],
+      allowedStates: parsed["--allowed-states"],
+      push: parsed["--push"],
+      dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  if (subcommand === "poll-work-items") {
+    await runPollWorkItems({
+      model: parsed["--model"],
+      after: parsed["--after"],
+      allowedActorIds: parsed["--allowed-actor-ids"],
+      max: parsed["--max"],
+      mode: parsed["--mode"],
+      allowedFields: parsed["--allowed-fields"],
+      allowedStates: parsed["--allowed-states"],
+      push: parsed["--push"],
       dryRun: parsed["--dry-run"] === true,
     });
     return;
