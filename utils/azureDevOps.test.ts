@@ -407,6 +407,34 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects PR creation when Pullfrog ownership proof is missing", async () => {
+    const sourceBranch = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(sourceBranch);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      expect(url).toContain(
+        "/refs?filter=" + encodeURIComponent("heads/" + ownershipBranch)
+      );
+      return jsonResponse({ value: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch,
+        sourceCommitId,
+        targetBranch: "main",
+        title: "Fix",
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("ownership proof is missing");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("fails closed when the source branch moved before PR creation", async () => {
     const sourceBranch = "pullfrog/branches/fix-42";
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
