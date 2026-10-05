@@ -1161,7 +1161,6 @@ async function runWorkItem(params: {
     }
     const lock = await repositoryClient.acquireWorkItemLock({
       workItemId,
-      revision: workItem.revision,
       ...(commentId === undefined ? {} : { commentId }),
       anchorCommitId,
     });
@@ -1209,7 +1208,6 @@ async function runWorkItem(params: {
   if (!params.dryRun) {
     const lock = await repositoryClient.acquireWorkItemLock({
       workItemId,
-      revision: workItem.revision,
       ...(commentId === undefined ? {} : { commentId }),
       anchorCommitId,
     });
