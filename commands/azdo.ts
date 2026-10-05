@@ -1329,6 +1329,16 @@ async function runAutofixCi(params: {
         "Azure DevOps CI requeue blocked: PR source changed after repair analysis"
       );
     }
+    if (expectedTargetSha) {
+      const targetBeforeRequeue = await repositoryClient.getBranchObjectId(
+        ctx.targetBranch
+      );
+      if (targetBeforeRequeue !== expectedTargetSha) {
+        throw new Error(
+          "Azure DevOps CI requeue blocked: PR target changed after repair analysis"
+        );
+      }
+    }
     const queued = await buildClient.requeueBuild({
       buildId,
       pullRequestId: ctx.pullRequestId,
@@ -1376,7 +1386,13 @@ async function runRequeueBuild(params: {
   );
   const sourceSha = ctx.sourceCommitId.toLowerCase();
   const client = new AzureDevOpsClient(ctx);
+  const repositoryClient = new AzureDevOpsRepositoryClient(ctx);
   const buildClient = new AzureDevOpsBuildClient(ctx);
+  const pullRequest = await client.getPullRequest();
+  const mergeSha =
+    pullRequest.lastMergeCommit?.commitId?.trim().toLowerCase();
+  const expectedTargetSha =
+    pullRequest.lastMergeTargetCommit?.commitId?.trim().toLowerCase();
 
   const liveSource = await client.getLiveSourceCommitId();
   if (!liveSource || liveSource !== sourceSha) {
@@ -1384,11 +1400,20 @@ async function runRequeueBuild(params: {
       "Azure DevOps build requeue blocked: PR source changed"
     );
   }
+  if (expectedTargetSha) {
+    const liveTarget = await repositoryClient.getBranchObjectId(ctx.targetBranch);
+    if (liveTarget !== expectedTargetSha) {
+      throw new Error(
+        "Azure DevOps build requeue blocked: PR target changed"
+      );
+    }
+  }
 
   const queued = await buildClient.requeueBuild({
     buildId,
     pullRequestId: ctx.pullRequestId,
     sourceSha,
+    mergeSha,
   });
   console.log(
     "queued Azure Pipeline build " +
