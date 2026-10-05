@@ -239,6 +239,20 @@ const REPAIR_PERMISSIONS = {
   external_directory: { "*": "deny", "/tmp/*": "allow" },
 } as const;
 
+const REPOSITORY_READ_PERMISSIONS = {
+  "*": "deny",
+  bash: "deny",
+  edit: "deny",
+  webfetch: "deny",
+  task: "deny",
+  todowrite: "deny",
+  skill: "deny",
+  read: { "*": "allow", ...GIT_NATIVE_READ_DENY_OPENCODE },
+  glob: "allow",
+  grep: "allow",
+  external_directory: { "*": "deny", "/tmp/*": "allow" },
+} as const;
+
 function buildOpenCodeConfig(model: string): string {
   const config: OpenCodeConfig = {
     permission: READ_ONLY_PERMISSIONS,
@@ -252,6 +266,16 @@ function buildOpenCodeConfig(model: string): string {
 function buildRepairOpenCodeConfig(model: string): string {
   const config: OpenCodeConfig = {
     permission: REPAIR_PERMISSIONS,
+    provider: {
+      ...azureProvider(model),
+    },
+  };
+  return JSON.stringify(config);
+}
+
+function buildRepositoryReadOpenCodeConfig(model: string): string {
+  const config: OpenCodeConfig = {
+    permission: REPOSITORY_READ_PERMISSIONS,
     provider: {
       ...azureProvider(model),
     },
@@ -338,6 +362,71 @@ async function runAzureRepairModel(params: {
     }
 
     return boundedReviewOutput(stripAnsi(child.stdout || ""), 30_000);
+  } finally {
+    restoreAzureDevOpsAuth();
+    if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
+    else process.env.PULLFROG_TEMP_DIR = priorTempDir;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function runAzureRepositoryReadModel(params: {
+  model: string | undefined;
+  prompt: string;
+  cwd: string;
+}): Promise<string> {
+  const model = resolveModel(params.model);
+  validateModelEnvironment(model);
+
+  const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-work-item-read-"));
+  const priorTempDir = process.env.PULLFROG_TEMP_DIR;
+  process.env.PULLFROG_TEMP_DIR = tempDir;
+  const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
+
+  try {
+    const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: tempDir,
+      PWD: params.cwd,
+      XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
+      XDG_DATA_HOME: join(tempDir, "xdg-data"),
+      OPENCODE_CONFIG_CONTENT: buildRepositoryReadOpenCodeConfig(model),
+      OPENCODE_PERMISSION: JSON.stringify(REPOSITORY_READ_PERMISSIONS),
+      OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+      OPENCODE_PURE: "true",
+      OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+      OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+      OPENCODE_DISABLE_CLAUDE_CODE: "true",
+      OPENCODE_EXPERIMENTAL: "false",
+      OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
+    };
+    for (const name of AZDO_AUTH_ENV) delete childEnv[name];
+    delete childEnv.OPENCODE_CONFIG;
+    delete childEnv.OPENCODE_CONFIG_DIR;
+    delete childEnv.OPENCODE_TUI_CONFIG;
+
+    const child = spawnSync(
+      cliPath,
+      ["run", "--model", model, "--dir", params.cwd],
+      {
+        cwd: params.cwd,
+        input: params.prompt,
+        encoding: "utf-8",
+        maxBuffer: 16 * 1024 * 1024,
+        env: childEnv,
+      }
+    );
+    if (child.error) throw child.error;
+    if (child.status !== 0) {
+      const details = stripAnsi(child.stderr || child.stdout || "");
+      throw new Error(
+        "OpenCode Azure work-item analysis failed with exit " +
+          child.status +
+          (details ? ": " + details.slice(-4000) : "")
+      );
+    }
+    return boundedReviewOutput(stripAnsi(child.stdout || ""), 60_000);
   } finally {
     restoreAzureDevOpsAuth();
     if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
