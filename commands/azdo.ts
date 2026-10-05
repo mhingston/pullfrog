@@ -1135,6 +1135,7 @@ async function resolveAzureCiBuildId(params: {
   buildClient: AzureDevOpsBuildClient;
   pullRequestId: number;
   sourceSha: string;
+  mergeSha?: string | undefined;
 }): Promise<number | undefined> {
   if (params.build?.trim()) {
     return requireCliPositiveInteger("--build", params.build);
@@ -1148,6 +1149,7 @@ async function resolveAzureCiBuildId(params: {
   const builds = await params.buildClient.listPullRequestBuilds({
     pullRequestId: params.pullRequestId,
     sourceSha: params.sourceSha,
+    mergeSha: params.mergeSha,
     max: 25,
   });
   return builds.find((build) => {
@@ -1178,6 +1180,23 @@ async function runAutofixCi(params: {
   const repositoryClient = new AzureDevOpsRepositoryClient(ctx);
   const buildClient = new AzureDevOpsBuildClient(ctx);
   const pullRequest = await client.getPullRequest();
+  const mergeSha =
+    pullRequest.lastMergeCommit?.commitId?.trim().toLowerCase();
+  if (mergeSha !== undefined && !/^[0-9a-f]{40}$/.test(mergeSha)) {
+    throw new Error(
+      "Azure DevOps CI autofix blocked: PR returned an invalid merge revision"
+    );
+  }
+  const expectedTargetSha =
+    pullRequest.lastMergeTargetCommit?.commitId?.trim().toLowerCase();
+  if (
+    expectedTargetSha !== undefined &&
+    !/^[0-9a-f]{40}$/.test(expectedTargetSha)
+  ) {
+    throw new Error(
+      "Azure DevOps CI autofix blocked: PR returned an invalid target revision"
+    );
+  }
 
   const liveSource = await client.getLiveSourceCommitId();
   if (!liveSource || liveSource !== sourceSha) {
@@ -1214,6 +1233,7 @@ async function runAutofixCi(params: {
     buildClient,
     pullRequestId: ctx.pullRequestId,
     sourceSha,
+    mergeSha,
   });
   if (!buildId) {
     console.log(
@@ -1226,6 +1246,7 @@ async function runAutofixCi(params: {
     buildId,
     pullRequestId: ctx.pullRequestId,
     sourceSha,
+    mergeSha,
     secrets: azureRepositorySecrets(ctx.authorization),
   });
 
@@ -1259,6 +1280,15 @@ async function runAutofixCi(params: {
         (reservation.attempt ? " (attempt " + reservation.attempt + ")" : "")
     );
     return;
+  }
+
+  if (expectedTargetSha) {
+    const liveTarget = await repositoryClient.getBranchObjectId(ctx.targetBranch);
+    if (liveTarget !== expectedTargetSha) {
+      throw new Error(
+        "Azure DevOps CI autofix blocked: PR target changed since the failed build"
+      );
+    }
   }
 
   prepareAzureDevOpsSourceCheckout({
@@ -1303,6 +1333,7 @@ async function runAutofixCi(params: {
       buildId,
       pullRequestId: ctx.pullRequestId,
       sourceSha,
+      mergeSha,
     });
     console.log(
       "requeued Azure Pipeline build " +
