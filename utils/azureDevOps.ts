@@ -721,6 +721,49 @@ export class AzureDevOpsClient {
       };
     }
 
+    // Confirm the election once more before model execution. Azure's comment
+    // create API has no conditional create, so the reservation is
+    // source-convergent rather than transactionally atomic.
+    if (settleMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, settleMs));
+    }
+    const confirmed = await this.getThread(params.threadId);
+    const completedDuringConfirmation = this.#followUpComments(
+      confirmed,
+      replyMarker
+    )[0];
+    if (completedDuringConfirmation) {
+      await this.#deleteComment(params.threadId, posted.id);
+      return {
+        reserved: false,
+        reason: "handled",
+        commentId: completedDuringConfirmation.id,
+      };
+    }
+
+    const confirmedContenders = this.#followUpReservationComments(
+      confirmed,
+      params.threadId,
+      params.triggerCommentId
+    );
+    const confirmedCanonical =
+      confirmedContenders[0] ??
+      ({
+        comment: posted,
+        claimId: params.claimId,
+      } as const);
+    if (
+      confirmedCanonical.comment.id !== posted.id ||
+      confirmedCanonical.claimId !== params.claimId
+    ) {
+      await this.#deleteComment(params.threadId, posted.id);
+      return {
+        reserved: false,
+        reason: "claimed",
+        commentId: confirmedCanonical.comment.id,
+      };
+    }
+
     return {
       reserved: true,
       reservationCommentId: posted.id,
