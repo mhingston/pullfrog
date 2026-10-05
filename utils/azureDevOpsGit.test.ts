@@ -14,6 +14,7 @@ import {
   scrubAzureDevOpsGitCredentials,
   validateAzureDevOpsBranchName,
   validateAzureDevOpsPullfrogBranch,
+  withAzureDevOpsIsolatedWorktree,
   type AzureDevOpsGitContext,
 } from "./azureDevOpsGit.ts";
 
@@ -149,6 +150,34 @@ describe("Azure DevOps enabled branch ownership", () => {
           verifyOwnership: async () => true,
         })
       ).rejects.toThrow("requires enabled push access");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Azure DevOps isolated worktree", () => {
+  it("discards candidate changes without changing the shared checkout", async () => {
+    const { root, sha } = makeRepo();
+    try {
+      const originalBranch = git(root, ["branch", "--show-current"]);
+      await withAzureDevOpsIsolatedWorktree({
+        cwd: root,
+        run: async (worktree) => {
+          expect(worktree).not.toBe(root);
+          writeFileSync(join(worktree, "generated.txt"), "candidate\n");
+          writeFileSync(join(worktree, "base.txt"), "changed\n");
+          expect(git(worktree, ["status", "--porcelain"])).not.toBe("");
+        },
+      });
+
+      expect(git(root, ["branch", "--show-current"])).toBe(originalBranch);
+      expect(git(root, ["rev-parse", "HEAD"]).toLowerCase()).toBe(sha);
+      expect(git(root, ["status", "--porcelain"])).toBe("");
+      expect(() => git(root, ["worktree", "list", "--porcelain"])).not.toThrow();
+      expect(git(root, ["worktree", "list", "--porcelain"])).not.toContain(
+        "pullfrog-azdo-worktree-"
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

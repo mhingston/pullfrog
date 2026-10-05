@@ -19,7 +19,7 @@ export function parseAzureAllowedActorIds(raw: string | undefined): Set<string> 
     .filter(Boolean);
   if (values.length === 0) {
     throw new Error(
-      "automatic Azure follow-up polling requires at least one allowed actor id"
+      "automatic Azure execution requires at least one allowed actor id"
     );
   }
   return new Set(values);
@@ -82,13 +82,13 @@ export function parseAzurePollAfter(raw: string | undefined): Date {
   const value = raw?.trim();
   if (!value) {
     throw new Error(
-      "automatic Azure follow-up polling requires --after or PULLFROG_AZDO_POLL_AFTER"
+      "automatic Azure polling requires --after or PULLFROG_AZDO_POLL_AFTER"
     );
   }
   const parsed = parseStrictRfc3339(value);
   if (!parsed) {
     throw new Error(
-      "invalid Azure follow-up polling cutoff; expected RFC 3339 with explicit Z/offset: " +
+      "invalid Azure polling cutoff; expected RFC 3339 with explicit Z/offset: " +
         value
     );
   }

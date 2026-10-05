@@ -186,6 +186,11 @@ export interface AzureDevOpsFollowUpLock {
   sourceCommitId: string;
 }
 
+export interface AzureDevOpsWorkItemLock {
+  refName: string;
+  anchorCommitId: string;
+}
+
 export type AzureDevOpsRepairKind = "ci" | "conflict";
 
 export type AzureDevOpsRepairAttemptReservation =
@@ -1118,10 +1123,45 @@ export class AzureDevOpsRepositoryClient {
     if (!/^refs\/heads\/pullfrog\/locks\/follow-up\//.test(lock.refName)) {
       throw new Error("refusing to release an unexpected Azure DevOps ref");
     }
-    if (!/^[0-9a-f]{40}$/.test(lock.sourceCommitId)) {
-      throw new Error("Azure DevOps follow-up lock has invalid source commit");
-    }
+    await this.#releaseCoordinationLock(lock.refName, lock.sourceCommitId, "follow-up");
+  }
 
+  workItemLockRef(params: {
+    workItemId: number;
+    commentId?: number | undefined;
+  }): string {
+    if (!Number.isInteger(params.workItemId) || params.workItemId <= 0) {
+      throw new Error("Azure DevOps work-item lock has invalid work item id");
+    }
+    if (
+      params.commentId !== undefined &&
+      (!Number.isInteger(params.commentId) || params.commentId <= 0)
+    ) {
+      throw new Error("Azure DevOps work-item lock has invalid comment id");
+    }
+    return (
+      "refs/heads/pullfrog/locks/work-item/wi-" +
+      params.workItemId +
+      (params.commentId === undefined ? "-created" : "-comment-" + params.commentId)
+    );
+  }
+
+  async acquireWorkItemLock(params: {
+    workItemId: number;
+    commentId?: number | undefined;
+    anchorCommitId: string;
+  }): Promise<
+    | { acquired: true; lock: AzureDevOpsWorkItemLock }
+    | { acquired: false; reason: "claimed"; refName: string }
+  > {
+    const anchorCommitId = params.anchorCommitId.trim().toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(anchorCommitId)) {
+      throw new Error("Azure DevOps work-item lock requires a valid anchor commit");
+    }
+    const refName = this.workItemLockRef({
+      workItemId: params.workItemId,
+      ...(params.commentId === undefined ? {} : { commentId: params.commentId }),
+    });
     const zeros = "0".repeat(40);
     const response = await this.#request<AzureDevOpsRefUpdateResponse>(
       "/refs?api-version=7.1",
@@ -1129,8 +1169,61 @@ export class AzureDevOpsRepositoryClient {
         method: "POST",
         body: JSON.stringify([
           {
-            name: lock.refName,
-            oldObjectId: lock.sourceCommitId,
+            name: refName,
+            oldObjectId: zeros,
+            newObjectId: anchorCommitId,
+          },
+        ]),
+      }
+    );
+    const result = Array.isArray(response) ? response[0] : response.value?.[0];
+    if (!result) {
+      throw new Error("Azure DevOps work-item lock update returned no result");
+    }
+    if (result.success === true || result.updateStatus === "succeeded") {
+      return {
+        acquired: true,
+        lock: { refName, anchorCommitId },
+      };
+    }
+    if (result.updateStatus === "staleOldObjectId") {
+      return { acquired: false, reason: "claimed", refName };
+    }
+    throw new Error(
+      "Azure DevOps work-item lock acquisition failed: " +
+        (result.updateStatus ?? "unknown") +
+        (result.customMessage ? " -- " + result.customMessage : "")
+    );
+  }
+
+  async releaseWorkItemLock(lock: AzureDevOpsWorkItemLock): Promise<void> {
+    if (!/^refs\/heads\/pullfrog\/locks\/work-item\//.test(lock.refName)) {
+      throw new Error("refusing to release an unexpected Azure DevOps ref");
+    }
+    await this.#releaseCoordinationLock(
+      lock.refName,
+      lock.anchorCommitId,
+      "work-item"
+    );
+  }
+
+  async #releaseCoordinationLock(
+    refName: string,
+    oldObjectId: string,
+    kind: "follow-up" | "work-item"
+  ): Promise<void> {
+    if (!/^[0-9a-f]{40}$/.test(oldObjectId)) {
+      throw new Error("Azure DevOps " + kind + " lock has invalid anchor commit");
+    }
+    const zeros = "0".repeat(40);
+    const response = await this.#request<AzureDevOpsRefUpdateResponse>(
+      "/refs?api-version=7.1",
+      {
+        method: "POST",
+        body: JSON.stringify([
+          {
+            name: refName,
+            oldObjectId,
             newObjectId: zeros,
           },
         ]),
@@ -1138,7 +1231,7 @@ export class AzureDevOpsRepositoryClient {
     );
     const result = Array.isArray(response) ? response[0] : response.value?.[0];
     if (!result) {
-      throw new Error("Azure DevOps follow-up lock release returned no result");
+      throw new Error("Azure DevOps " + kind + " lock release returned no result");
     }
     if (
       result.success === true ||
@@ -1147,9 +1240,10 @@ export class AzureDevOpsRepositoryClient {
     ) {
       return;
     }
-
     throw new Error(
-      "Azure DevOps follow-up lock release failed: " +
+      "Azure DevOps " +
+        kind +
+        " lock release failed: " +
         (result.updateStatus ?? "unknown") +
         (result.customMessage ? " -- " + result.customMessage : "")
     );
