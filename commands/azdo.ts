@@ -15,6 +15,10 @@ import {
 } from "../models.ts";
 import { azureProvider, installOpencodeCli, type OpenCodeConfig } from "../agents/opencodeShared.ts";
 import {
+  GIT_NATIVE_READ_DENY_OPENCODE,
+  GIT_NATIVE_WRITE_DENY_OPENCODE,
+} from "../agents/nativeFsDenies.ts";
+import {
   AzureDevOpsPullRequestProvider,
   azureDevOpsValidationEvent,
 } from "../providers/azureDevOps.ts";
@@ -196,14 +200,15 @@ const READ_ONLY_PERMISSIONS = {
 const REPAIR_PERMISSIONS = {
   "*": "deny",
   bash: "deny",
-  edit: "allow",
+  edit: { "*": "allow", ...GIT_NATIVE_WRITE_DENY_OPENCODE },
   webfetch: "deny",
   task: "deny",
   todowrite: "deny",
   skill: "deny",
-  read: "allow",
+  read: { "*": "allow", ...GIT_NATIVE_READ_DENY_OPENCODE },
   glob: "allow",
   grep: "allow",
+  external_directory: { "*": "deny", "/tmp/*": "allow" },
 } as const;
 
 function buildOpenCodeConfig(model: string): string {
