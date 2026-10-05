@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   azureDevOpsSourcePushArgs,
+  commitAndPushAzureDevOpsPullfrogBranch,
   commitAndPushAzureDevOpsSource,
   parseAzureDevOpsPushPermission,
+  prepareAzureDevOpsPullfrogBranchCheckout,
   prepareAzureDevOpsSourceCheckout,
   scrubAzureDevOpsGitCredentials,
   validateAzureDevOpsBranchName,
+  validateAzureDevOpsPullfrogBranch,
   type AzureDevOpsGitContext,
 } from "./azureDevOpsGit.ts";
 
@@ -84,6 +87,46 @@ describe("Azure DevOps branch validation", () => {
     "+main",
   ])("rejects ref/refspec-shaped branch %s", (branch) => {
     expect(() => validateAzureDevOpsBranchName(branch)).toThrow();
+  });
+});
+
+describe("Azure DevOps enabled branch ownership", () => {
+  it("accepts only the reserved Pullfrog branch namespace", () => {
+    expect(
+      validateAzureDevOpsPullfrogBranch("pullfrog/branches/fix-123")
+    ).toBe("pullfrog/branches/fix-123");
+    expect(() =>
+      validateAzureDevOpsPullfrogBranch("feature/fix-123")
+    ).toThrow("pullfrog/branches/");
+  });
+
+  it("requires enabled mode before preparing or committing an owned branch", async () => {
+    const { root, sha } = makeRepo();
+    const ownedCtx = {
+      ...context(sha),
+      sourceBranch: "pullfrog/branches/fix-123",
+    };
+    try {
+      expect(() =>
+        prepareAzureDevOpsPullfrogBranchCheckout({
+          cwd: root,
+          ctx: ownedCtx,
+          permission: "restricted",
+        })
+      ).toThrow("requires enabled push access");
+
+      await expect(
+        commitAndPushAzureDevOpsPullfrogBranch({
+          cwd: root,
+          ctx: ownedCtx,
+          permission: "restricted",
+          message: "fix: test",
+          getLiveSourceCommitId: async () => sha,
+        })
+      ).rejects.toThrow("requires enabled push access");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
