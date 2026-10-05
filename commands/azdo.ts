@@ -42,6 +42,7 @@ import {
   prepareAzureDevOpsMergeResolution,
   prepareAzureDevOpsPullfrogBranchCheckout,
   prepareAzureDevOpsSourceCheckout,
+  scrubAzureDevOpsGitCredentials,
 } from "../utils/azureDevOpsGit.ts";
 import { AzureDevOpsBuildClient } from "../utils/azureDevOpsBuild.ts";
 import {
@@ -1408,6 +1409,11 @@ async function runWorkItem(params: {
       allowState: effectivePolicy.state,
       allowedStates: effectivePolicy.allowedStates,
     });
+    // Azure Pipelines checkout can persist a live Authorization extraheader in
+    // .git/config. The model has no shell and .git/config reads are denied, but
+    // native grep/glob permissions are not path-scoped, so scrub persisted git
+    // credentials before any repository-reading model process as defense in depth.
+    scrubAzureDevOpsGitCredentials(process.cwd());
     const raw = await runAzureRepositoryReadModel({
       model: params.model,
       prompt,
