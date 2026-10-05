@@ -524,7 +524,6 @@ export class AzureDevOpsRepositoryClient {
       );
     }
 
-    let ownershipCreated = false;
     try {
       const ownershipResult = await createRef(ownershipBranch);
       if (
@@ -541,28 +540,53 @@ export class AzureDevOpsRepositoryClient {
               : "")
         );
       }
-      ownershipCreated = true;
-    } finally {
-      if (!ownershipCreated) {
-        try {
-          await this.#request<AzureDevOpsRefUpdateResponse>(
-            "/refs?api-version=7.1",
-            {
-              method: "POST",
-              body: JSON.stringify([
-                {
-                  name: "refs/heads/" + branch,
-                  oldObjectId: targetSha,
-                  newObjectId: zeros,
-                },
-              ]),
-            }
+    } catch (error) {
+      try {
+        const rollback = await this.#request<AzureDevOpsRefUpdateResponse>(
+          "/refs?api-version=7.1",
+          {
+            method: "POST",
+            body: JSON.stringify([
+              {
+                name: "refs/heads/" + branch,
+                oldObjectId: targetSha,
+                newObjectId: zeros,
+              },
+            ]),
+          }
+        );
+        const rollbackResult = Array.isArray(rollback)
+          ? rollback[0]
+          : rollback.value?.[0];
+        if (
+          !rollbackResult ||
+          !(
+            rollbackResult.success === true ||
+            rollbackResult.updateStatus === "succeeded" ||
+            rollbackResult.updateStatus === "succeededNonExistentRef"
+          )
+        ) {
+          throw new Error(
+            "Azure DevOps branch rollback failed: " +
+              (rollbackResult?.updateStatus ?? "unknown") +
+              (rollbackResult?.customMessage
+                ? " -- " + rollbackResult.customMessage
+                : "")
           );
-        } catch {
-          // Best effort only. The caller still fails closed and the reserved
-          // branch remains identifiable for operator cleanup.
         }
+      } catch (cleanupError) {
+        throw new Error(
+          (error instanceof Error ? error.message : String(error)) +
+            "; additionally failed to roll back branch " +
+            branch +
+            ": " +
+            (cleanupError instanceof Error
+              ? cleanupError.message
+              : String(cleanupError)),
+          { cause: error }
+        );
       }
+      throw error;
     }
 
     const [liveBranch, liveOwnership] = await Promise.all([
