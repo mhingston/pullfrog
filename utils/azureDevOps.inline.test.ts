@@ -183,7 +183,7 @@ describe("AzureDevOpsClient inline findings", () => {
       pullRequestThreadContext: {
         changeTrackingId: 5,
         iterationContext: {
-          firstComparingIteration: 0,
+          firstComparingIteration: 3,
           secondComparingIteration: 3,
         },
       },
