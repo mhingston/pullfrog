@@ -1,7 +1,6 @@
 import {
-  AzureDevOpsClient,
+  AzureDevOpsRepositoryClient,
   resolveAzureDevOpsRepositoryContext,
-  type AzureDevOpsClientContext,
 } from "./azureDevOps.ts";
 
 const env = {
@@ -14,12 +13,8 @@ const env = {
   SYSTEM_ACCESSTOKEN: "job-token",
 } satisfies NodeJS.ProcessEnv;
 
-function context(): AzureDevOpsClientContext {
-  return {
-    ...resolveAzureDevOpsRepositoryContext(env),
-    pullRequestId: 42,
-  };
-}
+const source = "0123456789abcdef0123456789abcdef01234567";
+const zeros = "0000000000000000000000000000000000000000";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(body === undefined ? undefined : JSON.stringify(body), {
@@ -28,354 +23,217 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function reservationMarker(
-  threadId: number,
-  triggerCommentId: number,
-  claimId: string
-): string {
-  return (
-    "<!-- pullfrog-azure-devops-followup-reservation:" +
-    threadId +
-    ":" +
-    triggerCommentId +
-    ":" +
-    claimId +
-    " -->"
-  );
-}
-
-describe("AzureDevOpsClient follow-up reservations", () => {
+describe("AzureDevOpsRepositoryClient follow-up locks", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("fails closed when another live reservation exists", async () => {
-    const thread = {
-      id: 17,
-      comments: [
-        { id: 4, content: "@pullfrog explain this" },
-        {
-          id: 5,
-          parentCommentId: 4,
-          content: reservationMarker(17, 4, "claim-other"),
-          publishedDate: "2026-10-05T05:59:00Z",
-        },
-      ],
-    };
+  it("uses a deterministic ref per PR/thread/comment", () => {
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsRepositoryContext(env)
+    );
+    expect(
+      client.followUpLockRef({
+        pullRequestId: 42,
+        threadId: 17,
+        triggerCommentId: 4,
+      })
+    ).toBe(
+      "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4"
+    );
+  });
 
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? "GET";
-      if (url.endsWith("/threads/17?api-version=7.1") && method === "GET") {
-        return jsonResponse(thread);
-      }
-      throw new Error("unexpected request: " + method + " " + url);
+  it("acquires the lock only through an all-zero compare-and-swap create", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body).toEqual([
+        {
+          name: "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4",
+          oldObjectId: zeros,
+          newObjectId: source,
+        },
+      ]);
+      return jsonResponse({
+        count: 1,
+        value: [
+          {
+            name: body[0].name,
+            oldObjectId: zeros,
+            newObjectId: source,
+            updateStatus: "succeeded",
+            success: true,
+          },
+        ],
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = new AzureDevOpsClient(context());
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsRepositoryContext(env)
+    );
     await expect(
-      client.reserveThreadFollowUp({
+      client.acquireFollowUpLock({
+        pullRequestId: 42,
         threadId: 17,
         triggerCommentId: 4,
-        claimId: "claim-mine1",
-        now: new Date("2026-10-05T06:00:00Z"),
-        settleMs: 0,
+        sourceCommitId: source,
       })
     ).resolves.toEqual({
-      reserved: false,
-      reason: "claimed",
-      commentId: 5,
+      acquired: true,
+      lock: {
+        refName:
+          "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4",
+        sourceCommitId: source,
+      },
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("treats a reservation without a valid server timestamp as active", async () => {
-    const thread = {
-      id: 17,
-      comments: [
-        { id: 4, content: "@pullfrog explain this" },
-        {
-          id: 5,
-          parentCommentId: 4,
-          content: reservationMarker(17, 4, "claim-other"),
-        },
-      ],
-    };
-
+  it("treats staleOldObjectId as another worker owning the lock", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse(thread))
+      vi.fn(async () =>
+        jsonResponse({
+          value: [
+            {
+              name:
+                "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4",
+              updateStatus: "staleOldObjectId",
+              success: false,
+            },
+          ],
+        })
+      )
     );
 
-    const client = new AzureDevOpsClient(context());
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsRepositoryContext(env)
+    );
     await expect(
-      client.reserveThreadFollowUp({
+      client.acquireFollowUpLock({
+        pullRequestId: 42,
         threadId: 17,
         triggerCommentId: 4,
-        claimId: "claim-mine1",
-        now: new Date("2026-10-05T06:00:00Z"),
-        settleMs: 0,
-      })
-    ).resolves.toMatchObject({
-      reserved: false,
-      reason: "claimed",
-      commentId: 5,
-    });
-  });
-
-  it("reclaims an expired reservation and acquires a new lease", async () => {
-    const thread = {
-      id: 17,
-      comments: [
-        { id: 4, content: "@pullfrog explain this" },
-        {
-          id: 5,
-          parentCommentId: 4,
-          content: reservationMarker(17, 4, "claim-stale"),
-          publishedDate: "2026-10-05T05:00:00Z",
-        },
-      ],
-    };
-
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? "GET";
-
-      if (url.endsWith("/threads/17?api-version=7.1") && method === "GET") {
-        return jsonResponse(thread);
-      }
-      if (url.endsWith("/threads/17/comments/5?api-version=7.1") && method === "DELETE") {
-        thread.comments = thread.comments.filter((comment) => comment.id !== 5);
-        return jsonResponse(undefined);
-      }
-      if (url.endsWith("/threads/17/comments?api-version=7.1") && method === "POST") {
-        const body = JSON.parse(String(init?.body));
-        const posted = {
-          id: 6,
-          parentCommentId: body.parentCommentId,
-          content: body.content,
-          publishedDate: "2026-10-05T06:00:00Z",
-        };
-        thread.comments.push(posted);
-        return jsonResponse(posted);
-      }
-      throw new Error("unexpected request: " + method + " " + url);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new AzureDevOpsClient(context());
-    await expect(
-      client.reserveThreadFollowUp({
-        threadId: 17,
-        triggerCommentId: 4,
-        claimId: "claim-mine1",
-        now: new Date("2026-10-05T06:00:00Z"),
-        leaseMs: 30 * 60 * 1000,
-        settleMs: 0,
+        sourceCommitId: source,
       })
     ).resolves.toEqual({
-      reserved: true,
-      reservationCommentId: 6,
-      claimId: "claim-mine1",
-    });
-  });
-
-  it("elects the lowest reservation comment id when workers race", async () => {
-    const thread = {
-      id: 17,
-      comments: [{ id: 4, content: "@pullfrog explain this" }],
-    };
-    const deleted: number[] = [];
-    let reads = 0;
-
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? "GET";
-
-      if (url.endsWith("/threads/17?api-version=7.1") && method === "GET") {
-        reads += 1;
-        return jsonResponse(thread);
-      }
-      if (url.endsWith("/threads/17/comments?api-version=7.1") && method === "POST") {
-        const body = JSON.parse(String(init?.body));
-        const other = {
-          id: 5,
-          parentCommentId: 4,
-          content: reservationMarker(17, 4, "claim-other"),
-          publishedDate: "2026-10-05T06:00:00Z",
-        };
-        const ours = {
-          id: 6,
-          parentCommentId: body.parentCommentId,
-          content: body.content,
-          publishedDate: "2026-10-05T06:00:00Z",
-        };
-        thread.comments.push(other, ours);
-        return jsonResponse(ours);
-      }
-      if (url.endsWith("/threads/17/comments/6?api-version=7.1") && method === "DELETE") {
-        deleted.push(6);
-        thread.comments = thread.comments.filter((comment) => comment.id !== 6);
-        return jsonResponse(undefined);
-      }
-      throw new Error("unexpected request: " + method + " " + url);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new AzureDevOpsClient(context());
-    await expect(
-      client.reserveThreadFollowUp({
-        threadId: 17,
-        triggerCommentId: 4,
-        claimId: "claim-mine1",
-        now: new Date("2026-10-05T06:00:00Z"),
-        settleMs: 0,
-      })
-    ).resolves.toEqual({
-      reserved: false,
+      acquired: false,
       reason: "claimed",
-      commentId: 5,
+      refName:
+        "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4",
     });
-    expect(reads).toBe(2);
-    expect(deleted).toEqual([6]);
   });
 
-  it("yields when a lower-id contender appears during confirmation", async () => {
-    const thread = {
-      id: 17,
-      comments: [{ id: 4, content: "@pullfrog explain this" }],
-    };
-    const deleted: number[] = [];
-    let reads = 0;
-
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? "GET";
-
-      if (url.endsWith("/threads/17?api-version=7.1") && method === "GET") {
-        reads += 1;
-        if (reads === 3) {
-          thread.comments.unshift({
-            id: 5,
-            parentCommentId: 4,
-            content: reservationMarker(17, 4, "claim-other"),
-            publishedDate: "2026-10-05T06:00:00Z",
-          });
-        }
-        return jsonResponse(thread);
-      }
-      if (url.endsWith("/threads/17/comments?api-version=7.1") && method === "POST") {
-        const body = JSON.parse(String(init?.body));
-        const ours = {
-          id: 6,
-          parentCommentId: body.parentCommentId,
-          content: body.content,
-          publishedDate: "2026-10-05T06:00:00Z",
-        };
-        thread.comments.push(ours);
-        return jsonResponse(ours);
-      }
-      if (url.endsWith("/threads/17/comments/6?api-version=7.1") && method === "DELETE") {
-        deleted.push(6);
-        return jsonResponse(undefined);
-      }
-      throw new Error("unexpected request: " + method + " " + url);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new AzureDevOpsClient(context());
-    await expect(
-      client.reserveThreadFollowUp({
-        threadId: 17,
-        triggerCommentId: 4,
-        claimId: "claim-mine1",
-        now: new Date("2026-10-05T06:00:00Z"),
-        settleMs: 0,
-      })
-    ).resolves.toEqual({
-      reserved: false,
-      reason: "claimed",
-      commentId: 5,
-    });
-    expect(reads).toBe(3);
-    expect(deleted).toEqual([6]);
-  });
-
-  it("does not reserve a request that already has a final reply", async () => {
-    const thread = {
-      id: 17,
-      comments: [
-        { id: 4, content: "@pullfrog explain this" },
-        {
-          id: 5,
-          parentCommentId: 4,
-          content:
-            "answer\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
-        },
-      ],
-    };
-
+  it("fails closed when acquisition has an ambiguous transport failure", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse(thread))
+      vi.fn(async () => {
+        throw new Error("connection reset after request");
+      })
     );
 
-    const client = new AzureDevOpsClient(context());
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsRepositoryContext(env)
+    );
     await expect(
-      client.reserveThreadFollowUp({
+      client.acquireFollowUpLock({
+        pullRequestId: 42,
         threadId: 17,
         triggerCommentId: 4,
-        claimId: "claim-mine1",
-        settleMs: 0,
+        sourceCommitId: source,
       })
-    ).resolves.toEqual({
-      reserved: false,
-      reason: "handled",
-      commentId: 5,
-    });
+    ).rejects.toThrow("connection reset after request");
   });
 
-  it("releases only reservations owned by the supplied claim id", async () => {
-    const thread = {
-      id: 17,
-      comments: [
-        { id: 4, content: "@pullfrog explain this" },
-        {
-          id: 5,
-          parentCommentId: 4,
-          content: reservationMarker(17, 4, "claim-mine1"),
-          publishedDate: "2026-10-05T06:00:00Z",
-        },
-        {
-          id: 6,
-          parentCommentId: 4,
-          content: reservationMarker(17, 4, "claim-other"),
-          publishedDate: "2026-10-05T06:00:00Z",
-        },
-      ],
-    };
-    const deleted: number[] = [];
+  it("rejects permission/policy failures instead of treating them as contention", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          value: [
+            {
+              name:
+                "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4",
+              updateStatus: "createBranchPermissionRequired",
+              success: false,
+              customMessage: "create branch denied",
+            },
+          ],
+        })
+      )
+    );
 
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? "GET";
-      if (url.endsWith("/threads/17?api-version=7.1") && method === "GET") {
-        return jsonResponse(thread);
-      }
-      if (url.endsWith("/threads/17/comments/5?api-version=7.1") && method === "DELETE") {
-        deleted.push(5);
-        return jsonResponse(undefined);
-      }
-      throw new Error("unexpected request: " + method + " " + url);
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsRepositoryContext(env)
+    );
+    await expect(
+      client.acquireFollowUpLock({
+        pullRequestId: 42,
+        threadId: 17,
+        triggerCommentId: 4,
+        sourceCommitId: source,
+      })
+    ).rejects.toThrow("createBranchPermissionRequired");
+  });
+
+  it("releases only with the exact source SHA compare-and-swap", async () => {
+    const refName =
+      "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4";
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body).toEqual([
+        {
+          name: refName,
+          oldObjectId: source,
+          newObjectId: zeros,
+        },
+      ]);
+      return jsonResponse([
+        {
+          name: refName,
+          oldObjectId: source,
+          newObjectId: zeros,
+          updateStatus: "succeeded",
+          success: true,
+        },
+      ]);
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = new AzureDevOpsClient(context());
-    await client.releaseThreadFollowUpReservation({
-      threadId: 17,
-      triggerCommentId: 4,
-      claimId: "claim-mine1",
-    });
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsRepositoryContext(env)
+    );
+    await expect(
+      client.releaseFollowUpLock({
+        refName,
+        sourceCommitId: source,
+      })
+    ).resolves.toBeUndefined();
+  });
 
-    expect(deleted).toEqual([5]);
+  it("fails closed if release loses its expected-object CAS", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          value: [
+            {
+              name:
+                "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4",
+              updateStatus: "staleOldObjectId",
+              success: false,
+            },
+          ],
+        })
+      )
+    );
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsRepositoryContext(env)
+    );
+    await expect(
+      client.releaseFollowUpLock({
+        refName:
+          "refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4",
+        sourceCommitId: source,
+      })
+    ).rejects.toThrow("staleOldObjectId");
   });
 });
