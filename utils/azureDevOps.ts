@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 export const AZDO_REVIEW_MARKER_PREFIX = "<!-- pullfrog-azure-devops-review:";
 export const AZDO_FINDING_MARKER_PREFIX = "<!-- pullfrog-azure-devops-finding:";
 export const AZDO_FOLLOWUP_MARKER_PREFIX = "<!-- pullfrog-azure-devops-followup:";
+export const AZDO_FOLLOWUP_RESERVATION_MARKER_PREFIX =
+  "<!-- pullfrog-azure-devops-followup-reservation:";
 export const AZDO_STATUS_GENRE = "pullfrog";
 export const AZDO_STATUS_NAME = "review";
 
@@ -131,6 +133,18 @@ export type AzureDevOpsInlinePublication =
 export type AzureDevOpsReviewPublication =
   | { published: true; created: boolean; threadId: number }
   | { published: false; supersededBy: string };
+
+export type AzureDevOpsFollowUpReservation =
+  | {
+      reserved: true;
+      reservationCommentId: number;
+      claimId: string;
+    }
+  | {
+      reserved: false;
+      reason: "handled" | "claimed";
+      commentId: number;
+    };
 
 interface AzureDevOpsList<T> {
   value: T[];
@@ -472,6 +486,22 @@ export class AzureDevOpsClient {
     );
   }
 
+  #followUpReservationMarker(
+    threadId: number,
+    triggerCommentId: number,
+    claimId: string
+  ): string {
+    return (
+      AZDO_FOLLOWUP_RESERVATION_MARKER_PREFIX +
+      threadId +
+      ":" +
+      triggerCommentId +
+      ":" +
+      claimId +
+      " -->"
+    );
+  }
+
   #followUpComments(
     thread: AzureDevOpsThread,
     marker: string
@@ -486,30 +516,236 @@ export class AzureDevOpsClient {
       .sort((a, b) => a.id - b.id);
   }
 
+  #followUpReservationComments(
+    thread: AzureDevOpsThread,
+    threadId: number,
+    triggerCommentId: number
+  ): Array<{ comment: AzureDevOpsComment; claimId: string }> {
+    const prefix =
+      AZDO_FOLLOWUP_RESERVATION_MARKER_PREFIX +
+      threadId +
+      ":" +
+      triggerCommentId +
+      ":";
+    const reservations: Array<{
+      comment: AzureDevOpsComment;
+      claimId: string;
+    }> = [];
+
+    for (const comment of thread.comments ?? []) {
+      if (comment.isDeleted || typeof comment.content !== "string") continue;
+      const marker = comment.content.match(
+        /<!-- pullfrog-azure-devops-followup-reservation:(\d+):(\d+):([A-Za-z0-9._-]{8,128}) -->/
+      );
+      if (!marker || marker[1] !== String(threadId) || marker[2] !== String(triggerCommentId)) {
+        continue;
+      }
+      if (!comment.content.includes(prefix)) continue;
+      reservations.push({ comment, claimId: marker[3]! });
+    }
+
+    return reservations.sort((left, right) => left.comment.id - right.comment.id);
+  }
+
+  async #deleteComment(threadId: number, commentId: number): Promise<void> {
+    try {
+      await this.#request<void>(
+        "/threads/" +
+          threadId +
+          "/comments/" +
+          commentId +
+          "?api-version=7.1",
+        { method: "DELETE" }
+      );
+    } catch (error) {
+      // Concurrent convergence may already have deleted the same marker.
+      if (
+        !(error instanceof Error) ||
+        !/^Azure DevOps API failed: 404\b/.test(error.message)
+      ) {
+        throw error;
+      }
+    }
+  }
+
   async #deleteDuplicateFollowUpComments(
     threadId: number,
     comments: AzureDevOpsComment[]
   ): Promise<void> {
     for (const duplicate of comments.slice(1)) {
-      try {
-        await this.#request<void>(
-          "/threads/" +
-            threadId +
-            "/comments/" +
-            duplicate.id +
-            "?api-version=7.1",
-          { method: "DELETE" }
-        );
-      } catch (error) {
-        // Another concurrent retry may have deleted the same duplicate after
-        // our re-list. Missing is already the converged state.
-        if (
-          !(error instanceof Error) ||
-          !/^Azure DevOps API failed: 404\b/.test(error.message)
-        ) {
-          throw error;
-        }
+      await this.#deleteComment(threadId, duplicate.id);
+    }
+  }
+
+  async reserveThreadFollowUp(params: {
+    threadId: number;
+    triggerCommentId: number;
+    claimId: string;
+    now?: Date | undefined;
+    leaseMs?: number | undefined;
+    settleMs?: number | undefined;
+  }): Promise<AzureDevOpsFollowUpReservation> {
+    if (!Number.isInteger(params.triggerCommentId) || params.triggerCommentId <= 0) {
+      throw new Error("Azure DevOps trigger comment id must be a positive integer");
+    }
+    if (!/^[A-Za-z0-9._-]{8,128}$/.test(params.claimId)) {
+      throw new Error("Azure DevOps follow-up reservation claim id is invalid");
+    }
+
+    const leaseMs = params.leaseMs ?? 30 * 60 * 1000;
+    if (!Number.isInteger(leaseMs) || leaseMs < 60_000 || leaseMs > 24 * 60 * 60 * 1000) {
+      throw new Error(
+        "Azure DevOps follow-up reservation lease must be between 1 minute and 24 hours"
+      );
+    }
+    const now = params.now ?? new Date();
+    if (Number.isNaN(now.getTime())) {
+      throw new Error("Azure DevOps follow-up reservation clock is invalid");
+    }
+
+    const before = await this.getThread(params.threadId);
+    const trigger = (before.comments ?? []).find(
+      (comment) => comment.id === params.triggerCommentId && !comment.isDeleted
+    );
+    if (!trigger) {
+      throw new Error(
+        "Azure DevOps trigger comment " +
+          params.triggerCommentId +
+          " does not exist in thread " +
+          params.threadId
+      );
+    }
+
+    const replyMarker = this.#followUpMarker(
+      params.threadId,
+      params.triggerCommentId
+    );
+    const handled = this.#followUpComments(before, replyMarker)[0];
+    if (handled) {
+      return { reserved: false, reason: "handled", commentId: handled.id };
+    }
+
+    const activeReservations: Array<{
+      comment: AzureDevOpsComment;
+      claimId: string;
+    }> = [];
+    const staleReservations: AzureDevOpsComment[] = [];
+
+    for (const reservation of this.#followUpReservationComments(
+      before,
+      params.threadId,
+      params.triggerCommentId
+    )) {
+      const publishedAt = reservation.comment.publishedDate
+        ? Date.parse(reservation.comment.publishedDate)
+        : Number.NaN;
+
+      // Missing/invalid server timestamps fail closed as active reservations.
+      if (
+        !Number.isFinite(publishedAt) ||
+        now.getTime() - publishedAt < leaseMs
+      ) {
+        activeReservations.push(reservation);
+      } else {
+        staleReservations.push(reservation.comment);
       }
+    }
+
+    if (activeReservations[0]) {
+      return {
+        reserved: false,
+        reason: "claimed",
+        commentId: activeReservations[0].comment.id,
+      };
+    }
+
+    for (const stale of staleReservations) {
+      await this.#deleteComment(params.threadId, stale.id);
+    }
+
+    const marker = this.#followUpReservationMarker(
+      params.threadId,
+      params.triggerCommentId,
+      params.claimId
+    );
+    const posted = await this.#request<AzureDevOpsComment>(
+      "/threads/" + params.threadId + "/comments?api-version=7.1",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          parentCommentId: params.triggerCommentId,
+          content: marker,
+          commentType: 1,
+        }),
+      }
+    );
+
+    const settleMs = params.settleMs ?? 250;
+    if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 5_000) {
+      throw new Error(
+        "Azure DevOps follow-up reservation settle time must be between 0 and 5000 ms"
+      );
+    }
+    if (settleMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, settleMs));
+    }
+
+    const after = await this.getThread(params.threadId);
+    const completed = this.#followUpComments(after, replyMarker)[0];
+    if (completed) {
+      await this.#deleteComment(params.threadId, posted.id);
+      return { reserved: false, reason: "handled", commentId: completed.id };
+    }
+
+    const contenders = this.#followUpReservationComments(
+      after,
+      params.threadId,
+      params.triggerCommentId
+    );
+    const canonical =
+      contenders[0] ??
+      ({
+        comment: posted,
+        claimId: params.claimId,
+      } as const);
+
+    if (
+      canonical.comment.id !== posted.id ||
+      canonical.claimId !== params.claimId
+    ) {
+      await this.#deleteComment(params.threadId, posted.id);
+      return {
+        reserved: false,
+        reason: "claimed",
+        commentId: canonical.comment.id,
+      };
+    }
+
+    return {
+      reserved: true,
+      reservationCommentId: posted.id,
+      claimId: params.claimId,
+    };
+  }
+
+  async releaseThreadFollowUpReservation(params: {
+    threadId: number;
+    triggerCommentId: number;
+    claimId: string;
+  }): Promise<void> {
+    if (!/^[A-Za-z0-9._-]{8,128}$/.test(params.claimId)) {
+      throw new Error("Azure DevOps follow-up reservation claim id is invalid");
+    }
+
+    const thread = await this.getThread(params.threadId);
+    const matching = this.#followUpReservationComments(
+      thread,
+      params.threadId,
+      params.triggerCommentId
+    ).filter((reservation) => reservation.claimId === params.claimId);
+
+    for (const reservation of matching) {
+      await this.#deleteComment(params.threadId, reservation.comment.id);
     }
   }
 
