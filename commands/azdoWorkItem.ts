@@ -569,6 +569,7 @@ export function azureWorkItemBuildBranch(params: {
 export function selectAzureWorkItemPollingCandidates(params: {
   workItem: WorkItemSnapshot;
   discussion: WorkItemDiscussion;
+  configuredMode: AzureWorkItemMode;
   allowedActorIds: Set<string>;
   after: Date;
 }): AzureWorkItemPollingCandidate[] {
@@ -591,7 +592,7 @@ export function selectAzureWorkItemPollingCandidates(params: {
     const selection = selectAzureWorkItemTrigger({
       workItem: params.workItem,
       discussion: params.discussion,
-      configuredMode: "links",
+      configuredMode: params.configuredMode,
       allowedActorIds: params.allowedActorIds,
     });
     if (selection.kind === "trigger") {
@@ -612,7 +613,7 @@ export function selectAzureWorkItemPollingCandidates(params: {
     const selection = selectAzureWorkItemTrigger({
       workItem: params.workItem,
       discussion: params.discussion,
-      configuredMode: "none",
+      configuredMode: params.configuredMode,
       allowedActorIds: params.allowedActorIds,
       commentId: comment.id,
     });
