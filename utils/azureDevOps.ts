@@ -447,9 +447,9 @@ export class AzureDevOpsRepositoryClient {
         "Azure DevOps new-branch creation blocked: source cannot be the target/default branch"
       );
     }
-    if (targetBranch.startsWith("pullfrog/locks/")) {
+    if (targetBranch.startsWith("pullfrog/")) {
       throw new Error(
-        "Azure DevOps new-branch creation blocked: lock refs cannot be branch bases"
+        "Azure DevOps new-branch creation blocked: internal Pullfrog refs cannot be branch bases"
       );
     }
 
@@ -668,9 +668,9 @@ export class AzureDevOpsRepositoryClient {
         "Azure DevOps PR creation blocked: source and target branches are identical"
       );
     }
-    if (targetBranch.startsWith("pullfrog/locks/")) {
+    if (targetBranch.startsWith("pullfrog/")) {
       throw new Error(
-        "Azure DevOps PR creation blocked: lock refs cannot be PR targets"
+        "Azure DevOps PR creation blocked: internal Pullfrog refs cannot be PR targets"
       );
     }
 
