@@ -83,6 +83,7 @@ export interface AzureDevOpsPullRequest {
   mergeStatus?: string | undefined;
   lastMergeSourceCommit?: { commitId?: string | undefined } | undefined;
   lastMergeTargetCommit?: { commitId?: string | undefined } | undefined;
+  lastMergeCommit?: { commitId?: string | undefined } | undefined;
   url?: string | undefined;
 }
 
