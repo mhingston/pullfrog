@@ -75,6 +75,19 @@ describe("Azure Pipeline build matching", () => {
     ).toBe(true);
   });
 
+  it("requires an explicit/derivable PR number even when the source SHA matches", () => {
+    expect(
+      buildMatchesPullRequestSource({
+        build: {
+          id: 10,
+          sourceVersion: sourceSha,
+        },
+        pullRequestId: 42,
+        sourceSha,
+      })
+    ).toBe(false);
+  });
+
   it("does not infer a PR/source match from branch names", () => {
     expect(
       buildMatchesPullRequestSource({
@@ -254,6 +267,56 @@ describe("AzureDevOpsBuildClient", () => {
     expect(result.failedLogs[0]?.excerpt).toContain("[REDACTED]");
     expect(result.failedLogs[0]?.excerpt).not.toContain("job-token");
     expect(result.failedLogs[0]?.issues.join("\n")).not.toContain("leak-me");
+  });
+
+  it("collects succeeded-with-issues timeline diagnostics for partially succeeded builds", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/builds/10?api-version=7.1")) {
+        return jsonResponse({
+          id: 10,
+          result: "partiallySucceeded",
+          triggerInfo: {
+            "pr.number": "42",
+            "pr.sourceSha": sourceSha,
+          },
+        });
+      }
+      if (url.endsWith("/builds/10/timeline?api-version=7.1")) {
+        return jsonResponse({
+          records: [
+            {
+              id: "task-warning",
+              type: "Task",
+              name: "lint",
+              result: "succeededWithIssues",
+              log: { id: 3 },
+              order: 1,
+              issues: [{ message: "lint warning promoted to partial success" }],
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/builds/10/logs/3?api-version=7.1")) {
+        return new Response("##[warning] lint warning\n", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      throw new Error("unexpected request: " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsBuildClient(context());
+    const result = await client.collectFailureContext({
+      buildId: 10,
+      pullRequestId: 42,
+      sourceSha,
+    });
+
+    expect(result.failedLogs).toHaveLength(1);
+    expect(result.failedLogs[0]?.recordName).toBe("lint");
+    expect(result.failedLogs[0]?.result).toBe("succeededWithIssues");
   });
 
   it("refuses failure logs for a different PR/source revision", async () => {
