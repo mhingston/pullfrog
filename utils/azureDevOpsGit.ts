@@ -478,6 +478,53 @@ function unresolvedMergeFiles(cwd: string): string[] {
     .filter(Boolean);
 }
 
+function conflictMarkerSize(cwd: string, file: string): number {
+  const output = git(cwd, [
+    "check-attr",
+    "conflict-marker-size",
+    "--",
+    file,
+  ]).trim();
+  const value = output.split(": ").at(-1)?.trim();
+  if (!value || value === "unspecified") return 7;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: invalid conflict-marker-size for " +
+        file +
+        ": " +
+        value
+    );
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 1000) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: invalid conflict-marker-size for " +
+        file +
+        ": " +
+        value
+    );
+  }
+  return parsed;
+}
+
+function hasConflictMarkers(
+  content: string,
+  markerSize: number
+): boolean {
+  const open = "<".repeat(markerSize);
+  const base = "|".repeat(markerSize);
+  const split = "=".repeat(markerSize);
+  const close = ">".repeat(markerSize);
+  return content.split(/\r?\n/).some(
+    (line) =>
+      line.startsWith(open + " ") ||
+      line.startsWith(base + " ") ||
+      line.trimEnd() === split ||
+      line.startsWith(close + " ")
+  );
+}
+
+
 export async function prepareAzureDevOpsMergeResolution(params: {
   cwd: string;
   ctx: AzureDevOpsGitContext;
@@ -680,7 +727,7 @@ export async function commitAndPushAzureDevOpsMergeResolution(params: {
         }
         continue;
       }
-      if (/^(<<<<<<< |\|\|\|\|\|\|\| |=======\s*$|>>>>>>> )/m.test(content)) {
+      if (hasConflictMarkers(content, conflictMarkerSize(params.cwd, file))) {
         throw new Error(
           "Azure DevOps merge commit blocked: conflict markers remain in " + file
         );
