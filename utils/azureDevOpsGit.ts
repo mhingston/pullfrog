@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -579,6 +579,7 @@ export async function commitAndPushAzureDevOpsMergeResolution(params: {
   permission: AzureDevOpsPushPermission;
   message: string;
   targetSha: string;
+  conflictedFiles: string[];
   getLiveSourceCommitId: () => Promise<string | undefined>;
   getLiveTargetCommitId: () => Promise<string | undefined>;
   dryRun?: boolean | undefined;
@@ -616,6 +617,36 @@ export async function commitAndPushAzureDevOpsMergeResolution(params: {
     throw new Error(
       "Azure DevOps merge commit blocked: MERGE_HEAD changed from the validated target"
     );
+  }
+
+  const expectedConflictFiles = [...new Set(params.conflictedFiles)].sort();
+  if (expectedConflictFiles.length > 0) {
+    for (const file of expectedConflictFiles) {
+      const fullPath = join(params.cwd, file);
+      let content: string;
+      try {
+        content = readFileSync(fullPath, "utf-8");
+      } catch (error) {
+        // A deleted conflict can be a valid resolution. Let git add record the
+        // deletion, but fail on other unreadable-file shapes below if they stay
+        // unresolved.
+        if (
+          !(error instanceof Error) ||
+          !("code" in error) ||
+          error.code !== "ENOENT"
+        ) {
+          throw error;
+        }
+        continue;
+      }
+      if (/^(<<<<<<< |=======\s*$|>>>>>>> )/m.test(content)) {
+        throw new Error(
+          "Azure DevOps merge commit blocked: conflict markers remain in " + file
+        );
+      }
+    }
+
+    git(params.cwd, ["add", "-A", "--", ...expectedConflictFiles]);
   }
 
   const unresolved = unresolvedMergeFiles(params.cwd);
