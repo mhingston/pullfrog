@@ -616,7 +616,10 @@ export class AzureDevOpsBoardsProvider implements WorkItemProvider {
         (cursorId > 0 ? "AND [System.Id] > " + cursorId + " " : "") +
         "ORDER BY [System.Id] ASC";
       const result = await this.#json<AzureWiqlResponse>(
-        "/_apis/wit/wiql?$top=" + (take + 1) + "&api-version=" + API_VERSION,
+        "/_apis/wit/wiql?timePrecision=true&$top=" +
+          (take + 1) +
+          "&api-version=" +
+          API_VERSION,
         {
           method: "POST",
           body: JSON.stringify({ query }),
