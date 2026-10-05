@@ -443,6 +443,7 @@ export async function commitAndPushAzureDevOpsPullfrogBranch(params: {
   permission: AzureDevOpsPushPermission;
   message: string;
   getLiveSourceCommitId: () => Promise<string | undefined>;
+  verifyOwnership: (branch: string) => Promise<boolean>;
   dryRun?: boolean | undefined;
 }): Promise<AzureDevOpsWriteResult> {
   if (params.permission !== "enabled") {
@@ -451,12 +452,21 @@ export async function commitAndPushAzureDevOpsPullfrogBranch(params: {
     );
   }
   const branch = validateAzureDevOpsPullfrogBranch(params.ctx.sourceBranch);
+  if (!(await params.verifyOwnership(branch))) {
+    throw new Error(
+      "Azure DevOps Pullfrog branch commit blocked: ownership proof is missing"
+    );
+  }
   return await commitAndPushAzureDevOpsSource({
-    ...params,
+    cwd: params.cwd,
     ctx: {
       ...params.ctx,
       sourceBranch: branch,
     },
+    permission: params.permission,
+    message: params.message,
+    getLiveSourceCommitId: params.getLiveSourceCommitId,
+    dryRun: params.dryRun,
   });
 }
 
