@@ -428,6 +428,12 @@ export class AzureDevOpsRepositoryClient {
     return exact?.objectId?.toLowerCase();
   }
 
+  async hasPullfrogBranchOwnership(branch: string): Promise<boolean> {
+    const validated = validateAzureDevOpsPullfrogBranch(branch);
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(validated);
+    return (await this.getBranchObjectId(ownershipBranch)) !== undefined;
+  }
+
   async createPullfrogBranch(params: {
     branch: string;
     targetBranch: string;
