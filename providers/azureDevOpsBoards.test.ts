@@ -337,6 +337,7 @@ describe("AzureDevOpsBoardsProvider changed-item polling", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/_apis/wit/wiql?")) {
+        expect(url).toContain("timePrecision=true");
         const query = String(JSON.parse(String(init?.body)).query);
         wiqlQueries.push(query);
         const cursorMatch = query.match(/\[System\.Id\] > (\d+)/);
