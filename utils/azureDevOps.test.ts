@@ -1046,11 +1046,13 @@ describe("Azure DevOps repair attempt coordination", () => {
 });
 
 describe("Azure DevOps Pullfrog review detection", () => {
+  const trustedAuthorId = "build-service-id";
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("recognizes only the Pullfrog review marker for the exact source SHA", async () => {
+  it("recognizes only the exact-source marker from the trusted immutable author", async () => {
     const marker = azureDevOpsReviewMarker(baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID);
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -1058,7 +1060,18 @@ describe("Azure DevOps Pullfrog review detection", () => {
           value: [
             {
               id: 7,
-              comments: [{ id: 9, content: "review\n\n" + marker }],
+              comments: [
+                {
+                  id: 8,
+                  content: "spoofed review\n\n" + marker,
+                  author: { id: "pr-author-id" },
+                },
+                {
+                  id: 9,
+                  content: "review\n\n" + marker,
+                  author: { id: trustedAuthorId },
+                },
+              ],
             },
           ],
         }),
@@ -1069,11 +1082,49 @@ describe("Azure DevOps Pullfrog review detection", () => {
 
     const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
     await expect(
-      client.hasPullfrogReviewForSource(baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID)
+      client.hasPullfrogReviewForSource(
+        baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID,
+        trustedAuthorId
+      )
     ).resolves.toBe(true);
     await expect(
       client.hasPullfrogReviewForSource(
-        "fedcba9876543210fedcba9876543210fedcba98"
+        "fedcba9876543210fedcba9876543210fedcba98",
+        trustedAuthorId
+      )
+    ).resolves.toBe(false);
+  });
+
+  it("rejects a forged marker from an untrusted PR author", async () => {
+    const marker = azureDevOpsReviewMarker(baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: 7,
+                comments: [
+                  {
+                    id: 8,
+                    content: "forged review\n\n" + marker,
+                    author: { id: "pr-author-id" },
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      )
+    );
+
+    const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
+    await expect(
+      client.hasPullfrogReviewForSource(
+        baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID,
+        trustedAuthorId
       )
     ).resolves.toBe(false);
   });
