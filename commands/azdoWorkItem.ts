@@ -37,6 +37,14 @@ export interface AzureWorkItemModelResult {
   state?: string | undefined;
 }
 
+export interface AzureWorkItemPollingCandidate {
+  workItemId: number;
+  revision: number;
+  actorId: string;
+  publishedAt: string;
+  commentId?: number | undefined;
+}
+
 const SAFE_TERM = /^[\p{L}\p{N}_./-]+$/u;
 const MODES = new Set<AzureWorkItemMode>([
   "none",
@@ -556,6 +564,76 @@ export function azureWorkItemBuildBranch(params: {
     params.revision +
     (params.commentId === undefined ? "" : "-c" + params.commentId)
   );
+}
+
+export function selectAzureWorkItemPollingCandidates(params: {
+  workItem: WorkItemSnapshot;
+  discussion: WorkItemDiscussion;
+  allowedActorIds: Set<string>;
+  after: Date;
+}): AzureWorkItemPollingCandidate[] {
+  const candidates: AzureWorkItemPollingCandidate[] = [];
+  const cutoff = params.after.getTime();
+  if (!Number.isFinite(cutoff)) {
+    throw new Error("Azure work-item polling cutoff is invalid");
+  }
+
+  const created = params.workItem.createdAt
+    ? Date.parse(params.workItem.createdAt)
+    : Number.NaN;
+  const authorId = params.workItem.author?.id?.trim().toLowerCase();
+  if (
+    Number.isFinite(created) &&
+    created >= cutoff &&
+    authorId &&
+    params.allowedActorIds.has(authorId)
+  ) {
+    const selection = selectAzureWorkItemTrigger({
+      workItem: params.workItem,
+      discussion: params.discussion,
+      configuredMode: "links",
+      allowedActorIds: params.allowedActorIds,
+    });
+    if (selection.kind === "trigger") {
+      candidates.push({
+        workItemId: params.workItem.id,
+        revision: params.workItem.revision,
+        actorId: authorId,
+        publishedAt: new Date(created).toISOString(),
+      });
+    }
+  }
+
+  for (const comment of params.discussion.comments) {
+    const timestamp = comment.createdAt ? Date.parse(comment.createdAt) : Number.NaN;
+    if (!Number.isFinite(timestamp) || timestamp < cutoff) continue;
+    const actorId = comment.author?.id?.trim().toLowerCase();
+    if (!actorId || !params.allowedActorIds.has(actorId)) continue;
+    const selection = selectAzureWorkItemTrigger({
+      workItem: params.workItem,
+      discussion: params.discussion,
+      configuredMode: "none",
+      allowedActorIds: params.allowedActorIds,
+      commentId: comment.id,
+    });
+    if (selection.kind !== "trigger") continue;
+    candidates.push({
+      workItemId: params.workItem.id,
+      revision: params.workItem.revision,
+      actorId,
+      publishedAt: new Date(timestamp).toISOString(),
+      commentId: comment.id,
+    });
+  }
+
+  return candidates.sort((left, right) => {
+    const byTime = left.publishedAt.localeCompare(right.publishedAt);
+    if (byTime !== 0) return byTime;
+    if (left.workItemId !== right.workItemId) {
+      return left.workItemId - right.workItemId;
+    }
+    return (left.commentId ?? 0) - (right.commentId ?? 0);
+  });
 }
 
 export function renderAzureWorkItemLinksResponse(params: {
