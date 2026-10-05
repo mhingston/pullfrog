@@ -680,7 +680,7 @@ export async function commitAndPushAzureDevOpsMergeResolution(params: {
         }
         continue;
       }
-      if (/^(<<<<<<< |=======\s*$|>>>>>>> )/m.test(content)) {
+      if (/^(<<<<<<< |\|\|\|\|\|\|\| |=======\s*$|>>>>>>> )/m.test(content)) {
         throw new Error(
           "Azure DevOps merge commit blocked: conflict markers remain in " + file
         );
