@@ -436,6 +436,9 @@ A typical validation pipeline can add a final step like:
       # Enable only if Pullfrog should modify human-authored PRs that it has
       # already reviewed at the exact failing source SHA.
       PULLFROG_AZDO_FIX_CI_REVIEWED_PRS: "enabled"
+      # Immutable Azure IdentityRef id for the identity that publishes Pullfrog
+      # review comments (normally the pipeline/build-service identity).
+      PULLFROG_AZDO_REVIEW_IDENTITY_ID: $(PULLFROG_AZDO_REVIEW_IDENTITY_ID)
       PULLFROG_AZDO_MAX_REPAIR_ATTEMPTS: "3"
 
       AZURE_API_KEY: $(AZURE_API_KEY)
@@ -449,9 +452,9 @@ The CI repair path fails closed on identity and staleness:
 
 - the build must belong to the current PR and exact source commit; for normal Azure Repos policy builds Pullfrog reads `pr.number` plus the serialized `System.PullRequest.SourceCommitId` build parameter, and also pins the synthetic merge revision when Azure exposes one;
 - Pullfrog revalidates the live PR source and target before consuming a repair-attempt slot;
-- failed job/task logs are selected from the Azure build timeline, deduplicated by log ID, redacted, and bounded before they enter model context;
+- failed job/task logs—and `succeededWithIssues` diagnostics for partially-succeeded builds—are selected from the Azure build timeline, deduplicated by log ID, redacted, and bounded before they enter model context;
 - log text is explicitly treated as untrusted prompt data;
-- human-authored PRs are eligible only when `PULLFROG_AZDO_FIX_CI_REVIEWED_PRS` is enabled **and** Pullfrog previously published its review marker for that exact source SHA;
+- human-authored PRs are eligible only when `PULLFROG_AZDO_FIX_CI_REVIEWED_PRS` is enabled and a review marker for that exact source SHA was authored by the immutable Azure identity configured in `PULLFROG_AZDO_REVIEW_IDENTITY_ID`; marker text from the PR author is never sufficient;
 - Pullfrog-authored PRs require `PULLFROG_AZDO_FIX_CI_OWN_PRS` and a valid Pullfrog branch-ownership ref;
 - before model execution Pullfrog atomically reserves a durable ref such as `refs/heads/pullfrog/repairs/pr-42/ci/attempt-1`; the source SHA stored in that ref suppresses duplicate workers and repeated repair of the same revision;
 - the attempt budget is deterministic (default 3, configurable from 1–10) and is retained across source updates rather than using a time-based lease;
