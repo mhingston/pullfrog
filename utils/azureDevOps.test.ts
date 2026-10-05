@@ -256,6 +256,67 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(refPosts).toHaveLength(2);
   });
 
+  it("CAS-deletes an owned branch and its ownership ref", async () => {
+    const branchName = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(branchName);
+    const refPosts: unknown[] = [];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (
+        url.includes(
+          "/refs?filter=" + encodeURIComponent("heads/" + ownershipBranch)
+        )
+      ) {
+        return jsonResponse({
+          value: [{
+            name: "refs/heads/" + ownershipBranch,
+            objectId: targetCommitId,
+          }],
+        });
+      }
+      if (url.endsWith("/refs?api-version=7.1") && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        refPosts.push(body);
+        return jsonResponse([
+          {
+            name: body[0]?.name,
+            updateStatus: "succeeded",
+            success: true,
+          },
+        ]);
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.deletePullfrogBranch({
+        branch: branchName,
+        expectedCommitId: sourceCommitId,
+        permission: "enabled",
+      })
+    ).resolves.toBeUndefined();
+
+    expect(refPosts).toEqual([
+      [{
+        name: "refs/heads/" + branchName,
+        oldObjectId: sourceCommitId,
+        newObjectId: "0".repeat(40),
+      }],
+      [{
+        name: "refs/heads/" + ownershipBranch,
+        oldObjectId: targetCommitId,
+        newObjectId: "0".repeat(40),
+      }],
+    ]);
+  });
+
   it("requires enabled permission for new Pullfrog branches", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
