@@ -374,7 +374,7 @@ pullfrog azdo poll-work-items \
   --max 5
 ```
 
-with `PULLFROG_AZDO_ALLOWED_ACTOR_IDS` set to comma-separated immutable Azure IdentityRef IDs. The poller uses bounded WIQL over recently changed project work items, then considers only created items or comments at/after the rollout cutoff. Display names and email addresses are never authorization inputs.
+with `PULLFROG_AZDO_ALLOWED_ACTOR_IDS` set to comma-separated immutable Azure IdentityRef IDs. The poller uses keyset-paginated, project-scoped WIQL over recently changed work items, with a fixed changed-date cutoff and an immutable work-item-ID cursor. Work-item detail fetches use bounded concurrency rather than a fan-out across the whole page. The scan has an explicit 5,000-item safety bound; reaching it is reported as a failure instead of silently starving later items. It then considers only created items or comments at/after the rollout cutoff. Display names and email addresses are never authorization inputs.
 
 #### GitHub issue → Azure Boards mapping
 
@@ -407,7 +407,7 @@ For automatic or manually selected work-item execution, Pullfrog also creates a 
 refs/heads/pullfrog/locks/work-item/
 ```
 
-The lock key includes only immutable event identity: work-item ID plus triggering comment ID, or the created-item event. Work-item revision is deliberately not part of the lock key, so an unrelated edit cannot allow the same comment event to execute concurrently under a new lock name. Revision remains a separate stale-write guard. Creation is an all-zero old-object CAS; contention exits before model work. Release uses the exact repository commit used to anchor the lock. A failed release leaves the lock in place and therefore fails closed rather than permitting duplicate execution.
+The lock key includes only immutable event identity: work-item ID plus triggering comment ID, or the created-item event. Work-item revision is deliberately not part of the lock key, so an unrelated edit cannot allow the same comment event to execute concurrently under a new lock name. Revision remains a separate stale-write guard. Creation is an all-zero old-object CAS; contention exits before model work. For `links` / `plan` / `custom` and build attempts that have not created a PR, release uses the exact repository commit used to anchor the lock. Once a `build` request creates its Azure Repos PR, Pullfrog deliberately retains that event-keyed ref as a durable idempotency record. This makes a later Boards comment/link publication failure fail closed instead of allowing the same event to create a second PR.
 
 #### Repository-level work-item tasks
 
@@ -420,14 +420,14 @@ The lock key includes only immutable event identity: work-item ID plus triggerin
 1. authenticate/authorize the immutable work-item actor and acquire the deterministic event lock;
 2. fetch bounded work-item/discussion/relationship/search context;
 3. create a branch under `pullfrog/branches/work-item-...` from an exact default-branch SHA, with the normal ownership proof;
-4. prepare the branch checkout and remove persisted git credentials;
-5. run the code-writing model with repository read/edit/glob/grep only—no shell, git metadata, web, or Azure credentials;
+4. create a disposable Git worktree, prepare the generated branch there, and remove persisted git credentials;
+5. run the code-writing model inside that isolated worktree with repository read/edit/glob/grep only—no shell, git metadata, web, or Azure credentials;
 6. reject the result if the work item advanced while the model was working;
 7. have the parent create the commit and CAS-push through the existing owned-branch safe-write path;
 8. create the Azure Repos PR through the existing ownership/source-staleness checks;
 9. record the generated PR on the work item as a hyperlink where possible and post the final marked response.
 
-If the model makes no working-tree changes, Pullfrog deletes the temporary Pullfrog branch and records that no PR was opened. If PR creation fails, it attempts to clean up the Pullfrog-owned branch. It never deletes user-owned branches, work items, or PRs.
+The disposable worktree is removed in a guaranteed cleanup path, including stale-item/model failures, so one polled work item cannot leave uncommitted files or a generated branch checked out for the next candidate. If the model makes no working-tree changes, Pullfrog deletes the temporary Pullfrog branch and records that no PR was opened. If PR creation fails, it attempts to clean up the Pullfrog-owned branch. It never deletes user-owned branches, work items, or PRs.
 
 The build-service identity needs Azure Boards read/comment access for `links/plan/custom`. Tag/state updates require work-item write permission. `build` additionally needs the existing Azure Repos branch/PR permissions plus scoped branch creation under `pullfrog/branches` and `pullfrog/locks/work-item`.
 
