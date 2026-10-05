@@ -89,18 +89,38 @@ describe("AzureDevOpsClient.updatePullRequestDescription", () => {
     vi.unstubAllGlobals();
   });
 
-  it("PATCHes only the current PR description with parent-owned authorization", async () => {
+  it("stale-checks then PATCHes only the current PR description with parent-owned authorization", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      const method = init?.method ?? "GET";
       expect(url).toBe(
         "https://dev.azure.com/acme/Platform/_apis/git/repositories/repo-guid/pullRequests/42?api-version=7.1"
       );
-      expect(init?.method).toBe("PATCH");
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer job-token");
+
+      if (method === "GET") {
+        return new Response(
+          JSON.stringify({
+            pullRequestId: 42,
+            title: "Azure PR",
+            description: "old description",
+            sourceRefName: "refs/heads/feature/azdo",
+            targetRefName: "refs/heads/main",
+            lastMergeSourceCommit: {
+              commitId: baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID,
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }
+        );
+      }
+
+      expect(method).toBe("PATCH");
       expect(JSON.parse(String(init?.body))).toEqual({
         description: "updated description",
       });
-
       return new Response(
         JSON.stringify({
           pullRequestId: 42,
@@ -119,12 +139,15 @@ describe("AzureDevOpsClient.updatePullRequestDescription", () => {
 
     const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
     await expect(
-      client.updatePullRequestDescription("updated description")
+      client.updatePullRequestDescription(
+        "updated description",
+        baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID
+      )
     ).resolves.toMatchObject({
       pullRequestId: 42,
       description: "updated description",
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
