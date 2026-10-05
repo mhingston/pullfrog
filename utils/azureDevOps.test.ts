@@ -261,6 +261,29 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("never allows the repository default branch as a PR source", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const ctx = {
+      ...resolveAzureDevOpsContext(baseEnv),
+      defaultBranch: "pullfrog/branches/default",
+    };
+    const client = new AzureDevOpsRepositoryClient(ctx);
+
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch: "pullfrog/branches/default",
+        sourceCommitId,
+        targetBranch: "main",
+        title: "Fix",
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("repository default branch");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("fails closed when the source branch moved before PR creation", async () => {
     const sourceBranch = "pullfrog/branches/fix-42";
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
