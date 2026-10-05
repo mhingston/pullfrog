@@ -882,6 +882,203 @@ describe("Azure DevOps safe PR mutations", () => {
   });
 });
 
+describe("Azure DevOps repair attempt coordination", () => {
+  const sourceCommitId = baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function jsonResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("reserves the next deterministic repair attempt with a zero-object CAS", async () => {
+    const posts: unknown[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.includes("/refs?filter=heads%2Fpullfrog%2Frepairs%2Fpr-42%2Fci%2Fattempt-")) {
+        return jsonResponse({
+          value: [
+            {
+              name: "refs/heads/pullfrog/repairs/pr-42/ci/attempt-1",
+              objectId: "1".repeat(40),
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/refs?api-version=7.1") && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        posts.push(body);
+        return jsonResponse([
+          {
+            name: "refs/heads/pullfrog/repairs/pr-42/ci/attempt-2",
+            updateStatus: "succeeded",
+            success: true,
+          },
+        ]);
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.reserveRepairAttempt({
+        pullRequestId: 42,
+        kind: "ci",
+        sourceCommitId,
+        maxAttempts: 3,
+      })
+    ).resolves.toEqual({
+      acquired: true,
+      kind: "ci",
+      attempt: 2,
+      refName: "pullfrog/repairs/pr-42/ci/attempt-2",
+      sourceCommitId,
+    });
+    expect(posts).toEqual([
+      [
+        {
+          name: "refs/heads/pullfrog/repairs/pr-42/ci/attempt-2",
+          oldObjectId: "0".repeat(40),
+          newObjectId: sourceCommitId,
+        },
+      ],
+    ]);
+  });
+
+  it("suppresses duplicate repair work for the same source SHA before model execution", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        value: [
+          {
+            name: "refs/heads/pullfrog/repairs/pr-42/ci/attempt-1",
+            objectId: sourceCommitId,
+          },
+        ],
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.reserveRepairAttempt({
+        pullRequestId: 42,
+        kind: "ci",
+        sourceCommitId,
+      })
+    ).resolves.toMatchObject({
+      acquired: false,
+      reason: "source-already-attempted",
+      attempt: 1,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops deterministically when the repair budget is exhausted", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        value: [1, 2, 3].map((attempt) => ({
+          name: "refs/heads/pullfrog/repairs/pr-42/conflict/attempt-" + attempt,
+          objectId: String(attempt).repeat(40),
+        })),
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.reserveRepairAttempt({
+        pullRequestId: 42,
+        kind: "conflict",
+        sourceCommitId,
+        maxAttempts: 3,
+      })
+    ).resolves.toEqual({
+      acquired: false,
+      kind: "conflict",
+      reason: "attempt-budget-exhausted",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a concurrent CAS winner as claimed instead of consuming another attempt", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (method === "GET") return jsonResponse({ value: [] });
+      return jsonResponse([
+        {
+          name: "refs/heads/pullfrog/repairs/pr-42/ci/attempt-1",
+          updateStatus: "staleOldObjectId",
+          success: false,
+        },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.reserveRepairAttempt({
+        pullRequestId: 42,
+        kind: "ci",
+        sourceCommitId,
+      })
+    ).resolves.toMatchObject({
+      acquired: false,
+      reason: "claimed",
+      attempt: 1,
+    });
+  });
+});
+
+describe("Azure DevOps Pullfrog review detection", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("recognizes only the Pullfrog review marker for the exact source SHA", async () => {
+    const marker = azureDevOpsReviewMarker(baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID);
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          value: [
+            {
+              id: 7,
+              comments: [{ id: 9, content: "review\n\n" + marker }],
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
+    await expect(
+      client.hasPullfrogReviewForSource(baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID)
+    ).resolves.toBe(true);
+    await expect(
+      client.hasPullfrogReviewForSource(
+        "fedcba9876543210fedcba9876543210fedcba98"
+      )
+    ).resolves.toBe(false);
+  });
+});
+
 describe("AzureDevOpsClient.upsertReviewThread", () => {
   const sourceCommitId = baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID;
   const marker = azureDevOpsReviewMarker(sourceCommitId);
