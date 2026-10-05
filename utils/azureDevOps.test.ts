@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   azureDevOpsReviewMarker,
   AzureDevOpsClient,
+  AzureDevOpsRepositoryClient,
   buildAzureDevOpsAuthorization,
   buildAzureDevOpsPullRequestDiff,
   resolveAzureDevOpsContext,
@@ -124,6 +125,234 @@ describe("AzureDevOpsClient.updatePullRequestDescription", () => {
       description: "updated description",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Azure DevOps safe PR mutations", () => {
+  const sourceCommitId = baseEnv.SYSTEM_PULLREQUEST_SOURCECOMMITID;
+  const targetCommitId = "1111111111111111111111111111111111111111";
+  const newerCommitId = "fedcba9876543210fedcba9876543210fedcba98";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function jsonResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("rejects a stale current-PR description update before PATCH", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      expect(method).toBe("GET");
+      expect(url).toContain("/pullRequests/42?api-version=7.1");
+      return jsonResponse({
+        lastMergeSourceCommit: { commitId: newerCommitId },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
+    await expect(
+      client.updatePullRequestDescription("new description", sourceCommitId)
+    ).rejects.toThrow("source advanced");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a PR only after independently validating source and target refs", async () => {
+    const sourceBranch = "pullfrog/branches/fix-42";
+    const targetBranch = "main";
+    const seenBodies: unknown[] = [];
+    let sourceReads = 0;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.includes("/refs?filter=heads%2Fpullfrog%2Fbranches%2Ffix-42")) {
+        sourceReads += 1;
+        return jsonResponse({
+          value: [{ name: "refs/heads/" + sourceBranch, objectId: sourceCommitId }],
+        });
+      }
+      if (url.includes("/refs?filter=heads%2Fmain")) {
+        return jsonResponse({
+          value: [{ name: "refs/heads/main", objectId: targetCommitId }],
+        });
+      }
+      if (url.endsWith("/pullrequests?api-version=7.1") && method === "POST") {
+        seenBodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          pullRequestId: 77,
+          title: "Fix CI",
+          description: "Repair failing validation",
+          repository: { id: "repo-guid" },
+          sourceRefName: "refs/heads/" + sourceBranch,
+          targetRefName: "refs/heads/main",
+          lastMergeSourceCommit: { commitId: sourceCommitId },
+        });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch,
+        sourceCommitId,
+        targetBranch,
+        title: "Fix CI",
+        description: "Repair failing validation",
+        permission: "enabled",
+      })
+    ).resolves.toMatchObject({
+      pullRequestId: 77,
+      sourceRefName: "refs/heads/" + sourceBranch,
+      targetRefName: "refs/heads/main",
+    });
+
+    expect(sourceReads).toBe(2);
+    expect(seenBodies).toEqual([
+      {
+        sourceRefName: "refs/heads/" + sourceBranch,
+        targetRefName: "refs/heads/main",
+        title: "Fix CI",
+        description: "Repair failing validation",
+      },
+    ]);
+  });
+
+  it("requires enabled permission and the reserved Pullfrog branch namespace", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch: "pullfrog/branches/fix-42",
+        sourceCommitId,
+        targetBranch: "main",
+        title: "Fix",
+        description: "",
+        permission: "restricted",
+      })
+    ).rejects.toThrow("requires enabled push permission");
+
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch: "users/mark/fix-42",
+        sourceCommitId,
+        targetBranch: "main",
+        title: "Fix",
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("pullfrog/branches/");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the source branch moved before PR creation", async () => {
+    const sourceBranch = "pullfrog/branches/fix-42";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method ?? "GET").toBe("GET");
+      expect(String(input)).toContain("/refs?");
+      return jsonResponse({
+        value: [{ name: "refs/heads/" + sourceBranch, objectId: newerCommitId }],
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch,
+        sourceCommitId,
+        targetBranch: "main",
+        title: "Fix",
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("source branch advanced");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("abandons a just-created PR if the source moves during creation", async () => {
+    const sourceBranch = "pullfrog/branches/fix-42";
+    let sourceReads = 0;
+    let abandoned = false;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.includes("/refs?filter=heads%2Fpullfrog%2Fbranches%2Ffix-42")) {
+        sourceReads += 1;
+        return jsonResponse({
+          value: [{
+            name: "refs/heads/" + sourceBranch,
+            objectId: sourceReads === 1 ? sourceCommitId : newerCommitId,
+          }],
+        });
+      }
+      if (url.includes("/refs?filter=heads%2Fmain")) {
+        return jsonResponse({
+          value: [{ name: "refs/heads/main", objectId: targetCommitId }],
+        });
+      }
+      if (url.endsWith("/pullrequests?api-version=7.1") && method === "POST") {
+        return jsonResponse({
+          pullRequestId: 77,
+          title: "Fix",
+          description: "",
+          repository: { id: "repo-guid" },
+          sourceRefName: "refs/heads/" + sourceBranch,
+          targetRefName: "refs/heads/main",
+        });
+      }
+      if (
+        url.endsWith("/pullrequests/77?api-version=7.1") &&
+        method === "PATCH"
+      ) {
+        expect(JSON.parse(String(init?.body))).toEqual({ status: "abandoned" });
+        abandoned = true;
+        return jsonResponse({
+          pullRequestId: 77,
+          title: "Fix",
+          description: "",
+          sourceRefName: "refs/heads/" + sourceBranch,
+          targetRefName: "refs/heads/main",
+        });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch,
+        sourceCommitId,
+        targetBranch: "main",
+        title: "Fix",
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("was abandoned");
+    expect(abandoned).toBe(true);
   });
 });
 
