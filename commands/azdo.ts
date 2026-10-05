@@ -28,8 +28,10 @@ import {
   stripRefsHeads,
 } from "../utils/azureDevOps.ts";
 import {
+  commitAndPushAzureDevOpsPullfrogBranch,
   commitAndPushAzureDevOpsSource,
   parseAzureDevOpsPushPermission,
+  prepareAzureDevOpsPullfrogBranchCheckout,
   prepareAzureDevOpsSourceCheckout,
 } from "../utils/azureDevOpsGit.ts";
 import {
@@ -67,6 +69,9 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("  poll-follow-ups  scan active PRs for authorized follow-up requests");
   params.stream("  checkout     prepare the validated PR source branch for code-writing work");
   params.stream("  commit       commit and push current working-tree changes to the PR source branch");
+  params.stream("  branch-create create and checkout a Pullfrog-owned Azure branch (enabled only)");
+  params.stream("  branch-commit commit and push changes to a Pullfrog-owned branch (enabled only)");
+  params.stream("  create-pr    create an Azure Repos PR from a Pullfrog-owned branch (enabled only)");
   params.stream("");
   params.stream("review/follow-up options:");
   params.stream("  -m, --model <provider/model>  OpenCode model (defaults to PULLFROG_MODEL or azure/$AZURE_DEPLOYMENT)");
@@ -83,7 +88,12 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("");
   params.stream("write options:");
   params.stream("      --push <mode>             disabled, restricted, or enabled (default: PULLFROG_PUSH or restricted)");
-  params.stream("      --message <text>          commit message (required for commit)");
+  params.stream("      --message <text>          commit message (required for commit/branch-commit)");
+  params.stream("      --branch <name>           Pullfrog branch (must be under pullfrog/branches/)");
+  params.stream("      --target <name>           target/base branch (default: repository default)");
+  params.stream("      --expected <sha>          expected branch/base SHA for CAS validation");
+  params.stream("      --title <text>            PR title (required for create-pr)");
+  params.stream("      --description <text>      PR description (optional for create-pr)");
   params.stream("      --dry-run                 validate commit/push without writing");
   params.stream("");
   params.stream("  -h, --help                    show help");
@@ -442,6 +452,20 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
   } finally {
     restoreAzureDevOpsAuth();
   }
+}
+
+function requireCliText(name: string, value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) throw new Error(name + " is required");
+  return trimmed;
+}
+
+function requireCliSha(name: string, value: string | undefined): string {
+  const normalized = requireCliText(name, value).toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(normalized)) {
+    throw new Error(name + " must be a 40-character git commit SHA");
+  }
+  return normalized;
 }
 
 function requireCliPositiveInteger(name: string, value: string | undefined): number {
@@ -822,6 +846,152 @@ async function runCommit(params: {
   );
 }
 
+async function runBranchCreate(params: {
+  push: string | undefined;
+  branch: string | undefined;
+  target: string | undefined;
+  expected: string | undefined;
+}): Promise<void> {
+  const repository = resolveAzureDevOpsRepositoryContext();
+  const permission = parseAzureDevOpsPushPermission(
+    params.push ?? process.env.PULLFROG_PUSH
+  );
+  const branch = requireCliText("--branch", params.branch);
+  const targetBranch = params.target?.trim() || repository.defaultBranch;
+  const expectedTargetCommitId = params.expected?.trim()
+    ? requireCliSha("--expected", params.expected)
+    : undefined;
+  const client = new AzureDevOpsRepositoryClient(repository);
+
+  const created = await client.createPullfrogBranch({
+    branch,
+    targetBranch,
+    expectedTargetCommitId,
+    permission,
+  });
+
+  const ctx = {
+    ...repository,
+    sourceBranch: created.branch,
+    sourceCommitId: created.sha,
+    targetBranch,
+  };
+
+  try {
+    prepareAzureDevOpsPullfrogBranchCheckout({
+      cwd: process.cwd(),
+      ctx,
+      permission,
+    });
+  } catch (error) {
+    try {
+      await client.deletePullfrogBranch({
+        branch: created.branch,
+        expectedCommitId: created.sha,
+        permission,
+      });
+    } catch (cleanupError) {
+      throw new Error(
+        "Azure DevOps branch was created but local checkout failed, and cleanup also failed: " +
+          (cleanupError instanceof Error ? cleanupError.message : String(cleanupError)),
+        { cause: error }
+      );
+    }
+    throw error;
+  }
+
+  console.log(
+    "created and prepared Azure DevOps Pullfrog branch " +
+      created.branch +
+      " at " +
+      created.sha.slice(0, 12) +
+      " from " +
+      targetBranch
+  );
+}
+
+async function runBranchCommit(params: {
+  push: string | undefined;
+  branch: string | undefined;
+  target: string | undefined;
+  expected: string | undefined;
+  message: string | undefined;
+  dryRun: boolean;
+}): Promise<void> {
+  const repository = resolveAzureDevOpsRepositoryContext();
+  const permission = parseAzureDevOpsPushPermission(
+    params.push ?? process.env.PULLFROG_PUSH
+  );
+  const branch = requireCliText("--branch", params.branch);
+  const targetBranch = params.target?.trim() || repository.defaultBranch;
+  const expected = requireCliSha("--expected", params.expected);
+  const message = requireCliText("--message", params.message);
+  const client = new AzureDevOpsRepositoryClient(repository);
+  const ctx = {
+    ...repository,
+    sourceBranch: branch,
+    sourceCommitId: expected,
+    targetBranch,
+  };
+
+  const result = await commitAndPushAzureDevOpsPullfrogBranch({
+    cwd: process.cwd(),
+    ctx,
+    permission,
+    message,
+    dryRun: params.dryRun,
+    getLiveSourceCommitId: () => client.getBranchObjectId(branch),
+  });
+
+  console.log(
+    (params.dryRun ? "Azure DevOps owned-branch write preflight passed for " : "committed and pushed to ") +
+      result.branch +
+      " at " +
+      result.pushedSha.slice(0, 12) +
+      "; " +
+      result.files.length +
+      " changed file(s)"
+  );
+}
+
+async function runCreatePr(params: {
+  push: string | undefined;
+  branch: string | undefined;
+  target: string | undefined;
+  expected: string | undefined;
+  title: string | undefined;
+  description: string | undefined;
+}): Promise<void> {
+  const repository = resolveAzureDevOpsRepositoryContext();
+  const permission = parseAzureDevOpsPushPermission(
+    params.push ?? process.env.PULLFROG_PUSH
+  );
+  const sourceBranch = requireCliText("--branch", params.branch);
+  const targetBranch = params.target?.trim() || repository.defaultBranch;
+  const sourceCommitId = requireCliSha("--expected", params.expected);
+  const title = requireCliText("--title", params.title);
+  const description = params.description ?? "";
+  const client = new AzureDevOpsRepositoryClient(repository);
+
+  const created = await client.createPullRequestFromPullfrogBranch({
+    sourceBranch,
+    sourceCommitId,
+    targetBranch,
+    title,
+    description,
+    permission,
+  });
+
+  console.log(
+    "created Azure DevOps pull request #" +
+      created.pullRequestId +
+      " from " +
+      sourceBranch +
+      " to " +
+      targetBranch
+  );
+}
+
 export async function runCli(params: AzdoCliParams): Promise<void> {
   const parsed = arg(
     {
@@ -830,6 +1000,11 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       "--dry-run": Boolean,
       "--push": String,
       "--message": String,
+      "--branch": String,
+      "--target": String,
+      "--expected": String,
+      "--title": String,
+      "--description": String,
       "--pull-request": String,
       "--thread": String,
       "--comment": String,
@@ -895,6 +1070,40 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       push: parsed["--push"],
       message: parsed["--message"],
       dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  if (subcommand === "branch-create") {
+    await runBranchCreate({
+      push: parsed["--push"],
+      branch: parsed["--branch"],
+      target: parsed["--target"],
+      expected: parsed["--expected"],
+    });
+    return;
+  }
+
+  if (subcommand === "branch-commit") {
+    await runBranchCommit({
+      push: parsed["--push"],
+      branch: parsed["--branch"],
+      target: parsed["--target"],
+      expected: parsed["--expected"],
+      message: parsed["--message"],
+      dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  if (subcommand === "create-pr") {
+    await runCreatePr({
+      push: parsed["--push"],
+      branch: parsed["--branch"],
+      target: parsed["--target"],
+      expected: parsed["--expected"],
+      title: parsed["--title"],
+      description: parsed["--description"],
     });
     return;
   }
