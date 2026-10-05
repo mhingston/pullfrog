@@ -62,6 +62,31 @@ type JsonPatchOperation =
   | { op: "test"; path: "/rev"; value: number }
   | { op: "add" | "replace"; path: string; value: unknown };
 
+const CHANGED_WORK_ITEM_PAGE_SIZE = 100;
+const CHANGED_WORK_ITEM_FETCH_CONCURRENCY = 8;
+
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  concurrency: number,
+  mapper: (value: T) => Promise<R>
+): Promise<R[]> {
+  if (values.length === 0) return [];
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= values.length) return;
+        results[index] = await mapper(values[index]!);
+      }
+    }
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 function identity(value: unknown): WorkItemIdentity | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as AzureIdentityRef;
@@ -563,30 +588,63 @@ export class AzureDevOpsBoardsProvider implements WorkItemProvider {
   async listChangedWorkItems(params: {
     after: Date;
     max?: number | undefined;
-  }): Promise<WorkItemSnapshot[]> {
+  }): Promise<{ items: WorkItemSnapshot[]; incomplete: boolean }> {
     if (!Number.isFinite(params.after.getTime())) {
       throw new Error("Azure Boards changed-work-item cutoff is invalid");
     }
-    const max = params.max ?? 100;
-    if (!Number.isInteger(max) || max <= 0 || max > 500) {
-      throw new Error("Azure Boards changed-work-item max must be between 1 and 500");
+    const max = params.max ?? 5_000;
+    if (!Number.isInteger(max) || max <= 0 || max > 10_000) {
+      throw new Error(
+        "Azure Boards changed-work-item scan max must be between 1 and 10000"
+      );
     }
+
     const cutoff = params.after.toISOString();
-    const query =
-      "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project " +
-      "AND [System.ChangedDate] >= '" +
-      escapeWiqlLiteral(cutoff) +
-      "' ORDER BY [System.ChangedDate] ASC";
-    const result = await this.#json<AzureWiqlResponse>(
-      "/_apis/wit/wiql?$top=" + max + "&api-version=" + API_VERSION,
-      {
-        method: "POST",
-        body: JSON.stringify({ query }),
+    const items: WorkItemSnapshot[] = [];
+    let cursorId = 0;
+
+    while (items.length < max) {
+      const take = Math.min(
+        CHANGED_WORK_ITEM_PAGE_SIZE,
+        max - items.length
+      );
+      const query =
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project " +
+        "AND [System.ChangedDate] >= '" +
+        escapeWiqlLiteral(cutoff) +
+        "' " +
+        (cursorId > 0 ? "AND [System.Id] > " + cursorId + " " : "") +
+        "ORDER BY [System.Id] ASC";
+      const result = await this.#json<AzureWiqlResponse>(
+        "/_apis/wit/wiql?$top=" + (take + 1) + "&api-version=" + API_VERSION,
+        {
+          method: "POST",
+          body: JSON.stringify({ query }),
+        }
+      );
+      const page = result.workItems ?? [];
+      const selectedIds = page.slice(0, take).map((item) => item.id);
+      if (selectedIds.length === 0) {
+        return { items, incomplete: false };
       }
-    );
-    return await Promise.all(
-      (result.workItems ?? []).slice(0, max).map((item) => this.getWorkItem(item.id))
-    );
+
+      const snapshots = await mapWithConcurrency(
+        selectedIds,
+        CHANGED_WORK_ITEM_FETCH_CONCURRENCY,
+        (id) => this.getWorkItem(id)
+      );
+      items.push(...snapshots);
+      cursorId = selectedIds[selectedIds.length - 1]!;
+
+      if (page.length <= take) {
+        return { items, incomplete: false };
+      }
+      if (items.length >= max) {
+        return { items, incomplete: true };
+      }
+    }
+
+    return { items, incomplete: true };
   }
 
   workItemWebUrl(id: number): string {
