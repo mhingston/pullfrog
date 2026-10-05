@@ -187,6 +187,92 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("atomically creates a Pullfrog branch and ownership proof", async () => {
+    const branchName = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(branchName);
+    const refPosts: unknown[] = [];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.includes("/refs?filter=heads%2Fmain")) {
+        return jsonResponse({
+          value: [{ name: "refs/heads/main", objectId: targetCommitId }],
+        });
+      }
+      if (url.endsWith("/refs?api-version=7.1") && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        refPosts.push(body);
+        return jsonResponse([
+          {
+            name: body[0]?.name,
+            oldObjectId: "0".repeat(40),
+            newObjectId: targetCommitId,
+            updateStatus: "succeeded",
+            success: true,
+          },
+        ]);
+      }
+      if (
+        url.includes("/refs?filter=" + encodeURIComponent("heads/" + branchName))
+      ) {
+        return jsonResponse({
+          value: [{ name: "refs/heads/" + branchName, objectId: targetCommitId }],
+        });
+      }
+      if (
+        url.includes(
+          "/refs?filter=" + encodeURIComponent("heads/" + ownershipBranch)
+        )
+      ) {
+        return jsonResponse({
+          value: [{
+            name: "refs/heads/" + ownershipBranch,
+            objectId: targetCommitId,
+          }],
+        });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.createPullfrogBranch({
+        branch: branchName,
+        targetBranch: "main",
+        expectedTargetCommitId: targetCommitId,
+        permission: "enabled",
+      })
+    ).resolves.toEqual({
+      branch: branchName,
+      sha: targetCommitId,
+      ownershipBranch,
+    });
+
+    expect(refPosts).toHaveLength(2);
+  });
+
+  it("requires enabled permission for new Pullfrog branches", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+
+    await expect(
+      client.createPullfrogBranch({
+        branch: "pullfrog/branches/fix-42",
+        targetBranch: "main",
+        permission: "restricted",
+      })
+    ).rejects.toThrow("requires enabled push permission");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("creates a PR only after independently validating source and target refs", async () => {
     const sourceBranch = "pullfrog/branches/fix-42";
     const targetBranch = "main";
