@@ -398,4 +398,67 @@ describe("AzureDevOpsClient inline findings", () => {
       ],
     });
   });
+  it("preserves human-resolved finding threads on rerun", async () => {
+    const marker = azureDevOpsFindingMarker(sourceCommitId, "src/a.ts", 12);
+    const threads = [
+      {
+        id: 10,
+        status: 3,
+        comments: [
+          {
+            id: 20,
+            content: "reviewer chose won't fix\n\n" + marker,
+            author: { id: trustedAuthorId },
+          },
+        ],
+      },
+    ];
+    const mutations: string[] = [];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/pullRequests/42?api-version=7.1")) {
+        return jsonResponse({ lastMergeSourceCommit: { commitId: sourceCommitId } });
+      }
+      if (url.endsWith("/pullRequests/42/iterations?api-version=7.1")) {
+        return jsonResponse({
+          count: 1,
+          value: [{ id: 3, sourceRefCommit: { commitId: sourceCommitId } }],
+        });
+      }
+      if (url.includes("/pullRequests/42/iterations/3/changes?")) {
+        return jsonResponse({
+          changeEntries: [{ changeTrackingId: 5, item: { path: "/src/a.ts" } }],
+          nextSkip: 0,
+          nextTop: 0,
+        });
+      }
+      if (url.endsWith("/pullRequests/42/threads?api-version=7.1") && method === "GET") {
+        return jsonResponse({ value: threads });
+      }
+      if (method === "PATCH") {
+        mutations.push(url);
+        return jsonResponse({});
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
+    await expect(
+      client.upsertInlineReviewThreads(
+        [{ path: "src/a.ts", line: 12, body: "new automated wording" }],
+        sourceCommitId,
+        trustedAuthorId
+      )
+    ).resolves.toMatchObject({
+      published: true,
+      threadIds: [],
+    });
+    expect(mutations).toEqual([]);
+    expect(threads[0]!.comments[0]!.content).toContain("reviewer chose won't fix");
+  });
+
+
 });
