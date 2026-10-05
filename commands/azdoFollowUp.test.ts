@@ -229,3 +229,26 @@ describe("Azure follow-up selection", () => {
     ).toThrow("PULLFROG_AZDO_REVIEW_IDENTITY_ID is required");
   });
 });
+
+
+describe("Azure follow-up conversation bounds", () => {
+  it("bounds long-lived thread context while preserving the target request separately", () => {
+    const comments = Array.from({ length: 80 }, (_, index) => ({
+      id: index + 1,
+      parentCommentId: index === 79 ? 1 : 0,
+      content: index === 79 ? "@pullfrog explain this" : "x".repeat(10_000),
+      author: { id: "user-" + index, displayName: "User " + index },
+    }));
+    const result = selectAzureFollowUp({
+      thread: thread(comments),
+      commentId: 80,
+      trustedAuthorId,
+    });
+    expect(result.kind).toBe("trigger");
+    if (result.kind !== "trigger") return;
+    expect(result.trigger.request).toBe("@pullfrog explain this");
+    expect(result.trigger.conversation.length).toBeLessThanOrEqual(30_000);
+    expect(result.trigger.conversation).toContain("comment 80");
+    expect(result.trigger.conversation).not.toContain("comment 1]");
+  });
+});
