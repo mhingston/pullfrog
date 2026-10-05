@@ -1128,16 +1128,10 @@ export class AzureDevOpsRepositoryClient {
 
   workItemLockRef(params: {
     workItemId: number;
-    revision: number;
     commentId?: number | undefined;
   }): string {
-    for (const [name, value] of [
-      ["work item id", params.workItemId],
-      ["revision", params.revision],
-    ] as const) {
-      if (!Number.isInteger(value) || value <= 0) {
-        throw new Error("Azure DevOps work-item lock has invalid " + name);
-      }
+    if (!Number.isInteger(params.workItemId) || params.workItemId <= 0) {
+      throw new Error("Azure DevOps work-item lock has invalid work item id");
     }
     if (
       params.commentId !== undefined &&
@@ -1148,15 +1142,12 @@ export class AzureDevOpsRepositoryClient {
     return (
       "refs/heads/pullfrog/locks/work-item/wi-" +
       params.workItemId +
-      "-rev-" +
-      params.revision +
       (params.commentId === undefined ? "-created" : "-comment-" + params.commentId)
     );
   }
 
   async acquireWorkItemLock(params: {
     workItemId: number;
-    revision: number;
     commentId?: number | undefined;
     anchorCommitId: string;
   }): Promise<
@@ -1167,7 +1158,10 @@ export class AzureDevOpsRepositoryClient {
     if (!/^[0-9a-f]{40}$/.test(anchorCommitId)) {
       throw new Error("Azure DevOps work-item lock requires a valid anchor commit");
     }
-    const refName = this.workItemLockRef(params);
+    const refName = this.workItemLockRef({
+      workItemId: params.workItemId,
+      ...(params.commentId === undefined ? {} : { commentId: params.commentId }),
+    });
     const zeros = "0".repeat(40);
     const response = await this.#request<AzureDevOpsRefUpdateResponse>(
       "/refs?api-version=7.1",
