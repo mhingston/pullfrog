@@ -203,6 +203,39 @@ describe.each(descriptionMutationFixtures)(
   }
 );
 
+describe("Azure PR description mutation safety", () => {
+  it("passes the validation source SHA into the Azure mutation API", async () => {
+    const ctx: AzureDevOpsContext = {
+      collectionUri: "https://dev.azure.com/acme/",
+      project: "Platform",
+      repositoryId: "repo-guid",
+      repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+      defaultBranch: "main",
+      pullRequestId: 42,
+      sourceBranch: "feature/provider",
+      sourceCommitId: sourceSha,
+      targetBranch: "main",
+      authorization: "Bearer test",
+    };
+    const update = vi.fn(async (description: string, expectedSourceCommitId?: string) => ({
+      pullRequestId: 42,
+      title: "provider boundary",
+      description,
+      sourceRefName: "refs/heads/feature/provider",
+      targetRefName: "refs/heads/main",
+    }));
+    const mutator = new AzureDevOpsPullRequestDescriptionMutator(ctx, {
+      updatePullRequestDescription: update,
+    });
+
+    await mutator.updatePullRequestDescription({
+      description: "updated description",
+    });
+
+    expect(update).toHaveBeenCalledWith("updated description", sourceSha);
+  });
+});
+
 describe("PR description mutation response identity", () => {
   it("rejects an Azure response for a different pull request", async () => {
     const ctx: AzureDevOpsContext = {
