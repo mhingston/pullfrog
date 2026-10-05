@@ -17,10 +17,18 @@ describe("Azure follow-up poll configuration", () => {
     );
   });
 
-  it("requires a valid rollout cutoff", () => {
+  it("requires a strict RFC 3339 rollout cutoff with an explicit timezone", () => {
     expect(() => parseAzurePollAfter(undefined)).toThrow("requires --after");
-    expect(() => parseAzurePollAfter("not-a-date")).toThrow("invalid");
+    expect(() => parseAzurePollAfter("not-a-date")).toThrow("RFC 3339");
+    expect(() => parseAzurePollAfter("0")).toThrow("RFC 3339");
+    expect(() => parseAzurePollAfter("2026-10-04T18:00:00")).toThrow("RFC 3339");
+    expect(() => parseAzurePollAfter("2026-02-30T18:00:00Z")).toThrow("RFC 3339");
+    expect(() => parseAzurePollAfter("2026-10-04T18:00:00+24:00")).toThrow("RFC 3339");
+
     expect(parseAzurePollAfter("2026-10-04T18:00:00Z").toISOString()).toBe(
+      "2026-10-04T18:00:00.000Z"
+    );
+    expect(parseAzurePollAfter("2026-10-04T19:00:00+01:00").toISOString()).toBe(
       "2026-10-04T18:00:00.000Z"
     );
   });
