@@ -28,12 +28,24 @@ import {
   stripRefsHeads,
 } from "../utils/azureDevOps.ts";
 import {
+  abortAzureDevOpsMergeResolution,
+  commitAndPushAzureDevOpsMergeResolution,
   commitAndPushAzureDevOpsPullfrogBranch,
   commitAndPushAzureDevOpsSource,
   parseAzureDevOpsPushPermission,
+  prepareAzureDevOpsMergeResolution,
   prepareAzureDevOpsPullfrogBranchCheckout,
   prepareAzureDevOpsSourceCheckout,
 } from "../utils/azureDevOpsGit.ts";
+import { AzureDevOpsBuildClient } from "../utils/azureDevOpsBuild.ts";
+import {
+  azureMergeStatusNeedsRepair,
+  buildAzureCiRepairPrompt,
+  buildAzureConflictRepairPrompt,
+  parseAzureRepairMaxAttempts,
+  resolveAzureCiAutofixSettings,
+  selectAzureCiRepairEligibility,
+} from "../utils/azureDevOpsAutofix.ts";
 import {
   buildAzureFollowUpPrompt,
   selectAzureFollowUp,
@@ -174,6 +186,19 @@ const READ_ONLY_PERMISSIONS = {
   grep: "deny",
 } as const;
 
+const REPAIR_PERMISSIONS = {
+  "*": "deny",
+  bash: "deny",
+  edit: "allow",
+  webfetch: "deny",
+  task: "deny",
+  todowrite: "deny",
+  skill: "deny",
+  read: "allow",
+  glob: "allow",
+  grep: "allow",
+} as const;
+
 function buildOpenCodeConfig(model: string): string {
   const config: OpenCodeConfig = {
     permission: READ_ONLY_PERMISSIONS,
@@ -182,6 +207,100 @@ function buildOpenCodeConfig(model: string): string {
     },
   };
   return JSON.stringify(config);
+}
+
+function buildRepairOpenCodeConfig(model: string): string {
+  const config: OpenCodeConfig = {
+    permission: REPAIR_PERMISSIONS,
+    provider: {
+      ...azureProvider(model),
+    },
+  };
+  return JSON.stringify(config);
+}
+
+function gitWorkingTreeStatus(cwd: string): string {
+  const result = spawnSync("git", ["status", "--porcelain"], {
+    cwd,
+    encoding: "utf-8",
+    maxBuffer: 4 * 1024 * 1024,
+    env: process.env,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(
+      "failed to inspect repair working tree: " +
+        String(result.stderr || result.stdout || "").trim()
+    );
+  }
+  return String(result.stdout || "").trim();
+}
+
+async function runAzureRepairModel(params: {
+  model: string | undefined;
+  prompt: string;
+  cwd: string;
+}): Promise<string> {
+  const model = resolveModel(params.model);
+  validateModelEnvironment(model);
+
+  const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-repair-"));
+  const priorTempDir = process.env.PULLFROG_TEMP_DIR;
+  process.env.PULLFROG_TEMP_DIR = tempDir;
+  const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
+
+  try {
+    const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: tempDir,
+      PWD: params.cwd,
+      XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
+      XDG_DATA_HOME: join(tempDir, "xdg-data"),
+      OPENCODE_CONFIG_CONTENT: buildRepairOpenCodeConfig(model),
+      OPENCODE_PERMISSION: JSON.stringify(REPAIR_PERMISSIONS),
+      OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+      OPENCODE_PURE: "true",
+      OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+      OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+      OPENCODE_DISABLE_CLAUDE_CODE: "true",
+      OPENCODE_EXPERIMENTAL: "false",
+      OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
+    };
+    for (const name of AZDO_AUTH_ENV) delete childEnv[name];
+    delete childEnv.OPENCODE_CONFIG;
+    delete childEnv.OPENCODE_CONFIG_DIR;
+    delete childEnv.OPENCODE_TUI_CONFIG;
+
+    const child = spawnSync(
+      cliPath,
+      ["run", "--model", model, "--dir", params.cwd],
+      {
+        cwd: params.cwd,
+        input: params.prompt,
+        encoding: "utf-8",
+        maxBuffer: 16 * 1024 * 1024,
+        env: childEnv,
+      }
+    );
+
+    if (child.error) throw child.error;
+    if (child.status !== 0) {
+      const details = stripAnsi(child.stderr || child.stdout || "");
+      throw new Error(
+        "OpenCode Azure repair failed with exit " +
+          child.status +
+          (details ? ": " + details.slice(-4000) : "")
+      );
+    }
+
+    return boundedReviewOutput(stripAnsi(child.stdout || ""), 30_000);
+  } finally {
+    restoreAzureDevOpsAuth();
+    if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
+    else process.env.PULLFROG_TEMP_DIR = priorTempDir;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 function boundedReviewOutput(output: string, maxChars = 60_000): string {
