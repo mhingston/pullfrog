@@ -55,6 +55,53 @@ function git(cwd: string, args: string[], options?: { env?: NodeJS.ProcessEnv })
   }).trimEnd();
 }
 
+export async function withAzureDevOpsIsolatedWorktree<T>(params: {
+  cwd: string;
+  run: (cwd: string) => Promise<T>;
+}): Promise<T> {
+  const root = mkdtempSync(join(tmpdir(), "pullfrog-azdo-worktree-"));
+  const worktree = join(root, "checkout");
+  let added = false;
+  let actionError: unknown;
+
+  try {
+    git(params.cwd, ["worktree", "add", "--detach", worktree, "HEAD"]);
+    added = true;
+    return await params.run(worktree);
+  } catch (error) {
+    actionError = error;
+    throw error;
+  } finally {
+    let cleanupError: unknown;
+    if (added) {
+      try {
+        git(params.cwd, ["worktree", "remove", "--force", worktree]);
+      } catch (error) {
+        cleanupError = error;
+      }
+      try {
+        git(params.cwd, ["worktree", "prune"]);
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+    if (cleanupError) {
+      const cleanupMessage =
+        cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      if (actionError) {
+        throw new Error(
+          (actionError instanceof Error ? actionError.message : String(actionError)) +
+            "; additionally failed to clean up isolated Azure worktree: " +
+            cleanupMessage,
+          { cause: actionError }
+        );
+      }
+      throw new Error("failed to clean up isolated Azure worktree: " + cleanupMessage);
+    }
+  }
+}
+
 function normalizeRepositoryUrl(raw: string): string {
   let url: URL;
   try {
