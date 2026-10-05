@@ -7,7 +7,7 @@
     Pullfrog
   </h1>
   <p align="center">
-    The BYOK CodeRabbit that runs in your GitHub Actions
+    The BYOK CodeRabbit that runs in your CI
   </p>
 </p>
 
@@ -21,7 +21,9 @@
 
 ## What is Pullfrog?
 
-Pullfrog is the BYOK CodeRabbit that runs in your GitHub Actions. It listens for GitHub events — PRs opened, issues created, reviews submitted, CI failures — and triggers agent runs based on your configuration, via a `pullfrog.yml` workflow that uses this open-source action. You control the infrastructure, the keys, and the costs.
+Pullfrog is the BYOK CodeRabbit that runs in your CI. The hosted product is GitHub-native: it listens for GitHub events — PRs opened, issues created, reviews submitted, CI failures — and triggers agent runs based on your configuration via a `pullfrog.yml` workflow that uses this open-source action. You control the infrastructure, the keys, and the costs.
+
+Pullfrog also has a CI-native **Azure DevOps** runtime for Azure Repos, Azure Pipelines, and Azure Boards. It does not require Service Hooks or a separate Pullfrog deployment: Azure Pipelines supplies the execution context and `System.AccessToken`, while Pullfrog handles review/task orchestration and publishes back through the Azure DevOps REST APIs. The hosted console remains GitHub-only.
 
 Pullfrog is not an agent itself. It wraps vanilla **[Claude Code](https://github.com/anthropics/claude-code)**, **[Codex](https://github.com/openai/codex)**, and **[OpenCode](https://github.com/anomalyco/opencode)**, selecting the one that matches your BYOK or bring-your-own-subscription configuration — so every run uses the vendor's real agent, and it reads the repo-level config you already keep for it: `CLAUDE.md` or `AGENTS.md`, skills, custom commands, and repo-level MCP servers.
 
@@ -34,7 +36,9 @@ Out of the box, it can:
 - **Triage issues** — respond to common questions, apply labels, link related issues and PRs, or draft implementation plans.
 - **Anything ad hoc** — tag `@pullfrog` in any issue, PR, or comment. It pulls in the surrounding context and figures out what to do. Prompt from the [console](https://pullfrog.com/console) for anything else.
 
-Each automation can be toggled from the dashboard and customized with per-trigger instructions.
+Each GitHub automation can be toggled from the dashboard and customized with per-trigger instructions.
+
+On Azure DevOps, the current CI-native runtime supports automatic PR review, inline findings and merge-gating status, interactive and scheduled follow-ups, safe PR-source writes, Pullfrog-owned branch/PR creation, CI failure and merge-conflict autofix, Azure Boards triage, and repository-level plan/build tasks. Azure setup/configuration currently lives in pipeline YAML/variables rather than the Pullfrog hosted console.
 
 ## Get started
 
@@ -45,6 +49,8 @@ npx pullfrog init
 ```
 
 Or [install from the browser](https://pullfrog.com/console). Setup takes about two minutes: install the GitHub App, add the `pullfrog.yml` workflow with one click, and pick a model. See [getting started](https://docs.pullfrog.com/getting-started).
+
+For Azure DevOps, use the [Azure DevOps](#azure-devops-ci-native-experimental) setup below instead. Azure is currently pipeline-native rather than console-managed.
 
 ## Runs on the subscription you already pay for
 
@@ -179,9 +185,11 @@ Pass a JSON Schema via the `output_schema` input to make the agent's output requ
 
 </details>
 
-## Azure DevOps (experimental)
+## Azure DevOps (CI-native, experimental)
 
-Pullfrog can run as a pull-request reviewer in **Azure Repos** from an **Azure Pipelines build-validation policy**. This path does not require a service hook, webhook, GitHub App, or separate Pullfrog deployment: the pipeline job supplies PR context through Azure's predefined variables, the agent reviews the source-commit diff, and Pullfrog publishes a summary, reliable inline findings, and an iteration-scoped PR status through the Azure DevOps REST API.
+Pullfrog supports the core review/task lifecycle across **Azure Repos**, **Azure Pipelines**, and **Azure Boards** using Azure Pipelines as the execution transport. This path does not require a Service Hook, webhook, GitHub App, or separate Pullfrog deployment.
+
+For PR validation, an Azure Pipelines build-validation job supplies PR context through Azure's predefined variables. Pullfrog can review the source-commit diff, publish a convergent summary and reliable inline findings, set an iteration-scoped merge-gating status, handle follow-up requests, safely write fixes, create Pullfrog-owned PRs, and repair eligible CI failures or merge conflicts. Azure Boards work items can also drive triage, planning, related-item lookup, allowlisted field/tag updates, and repository-level implementation tasks through explicit commands or scheduled polling.
 
 > Azure Repos does **not** use a YAML `pr:` trigger. Add the pipeline as a [**Build validation** policy](https://learn.microsoft.com/en-us/azure/devops/repos/git/branch-policies?view=azure-devops#set-build-validation) on the target branch instead. The `System.PullRequest.*` variables used by `pullfrog azdo review` are populated for those policy-triggered PR builds.
 
@@ -217,14 +225,16 @@ steps:
 
 Configure these values as pipeline variables or a variable group, marking `AZURE_API_KEY` secret. `AZURE_CONTEXT` and `AZURE_MAX_OUTPUT` are the context-window and maximum-output token counts for the model behind your deployment.
 
-The Azure runtime is still narrower than the GitHub Action, but now covers the main PR lifecycle:
+The Azure runtime now covers the core CI-native workflow, with a few intentional platform/product differences:
 
 - automatic review, inline/status publication, explicit and scheduled thread follow-ups, safe PR-source writes, Pullfrog-owned branch/PR creation, bounded CI autofix, and merge-conflict repair are implemented;
-- Azure Boards work-item triage, bounded search, comments, allowlisted updates, and repository-level plan/build tasks are implemented; Service Hook transport and the Pullfrog cloud console remain GitHub-only;
-- review/follow-up models run read-only; repair models receive only repository read/edit/glob/grep tools, with shell/web/task access denied, while Azure repository credentials are scrubbed before model execution;
-- it uses `System.AccessToken` by default; `AZURE_DEVOPS_PAT` is available as a local/debug fallback;
-- rerunning the validation updates the existing Pullfrog summary and same-location inline threads, and closes Pullfrog findings that disappeared;
-- `--dry-run` is supported by review and repair commands, and `--model provider/model` can select a concrete OpenCode model that authenticates from pipeline environment variables instead of Azure OpenAI.
+- Azure Boards work-item triage, bounded related-item search, comments, allowlisted tag/state updates, and repository-level `links` / `plan` / `build` / `custom` tasks are implemented;
+- work-item and follow-up polling provide a no-Service-Hook transport when webhook administration is unavailable;
+- review/follow-up models run read-only; repair/build models receive only the bounded repository tools required for the task, while shell/web/task access and Azure repository credentials remain denied;
+- `System.AccessToken` is the normal Azure Pipelines authentication path; `AZURE_DEVOPS_PAT` is retained only as a local/debug fallback;
+- rerunning validation converges the existing Pullfrog summary and same-location inline threads, and closes Pullfrog findings that disappeared;
+- `--dry-run` is supported by review and repair commands, and `--model provider/model` can select a concrete OpenCode model that authenticates from pipeline environment variables instead of Azure OpenAI;
+- the hosted Pullfrog console, central secret/configuration management, install lifecycle, and cloud run visibility remain GitHub-only. Azure configuration is intentionally pipeline/repository managed for now.
 
 For Azure Repos, grant the pipeline's build-service identity **Contribute to pull requests** on the repository. Keep `fetchDepth: 0` and `persistCredentials: true` for the current review step: Pullfrog compares `System.PullRequest.SourceCommitId` with the target branch rather than assuming the validation job's checked-out `HEAD` is the PR source commit. If you use the safe-write flow below, `azdo checkout` removes those persisted credentials before any code-writing process is allowed to touch the repository.
 
