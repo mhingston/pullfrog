@@ -1555,6 +1555,12 @@ async function runPollWorkItems(params: {
     .slice(0, max);
 
   if (selected.length === 0) {
+    if (scan.incomplete) {
+      throw new Error(
+        "Azure work-item polling reached the explicit 5000-item changed-work-item scan bound; " +
+          "narrow --after/PULLFROG_AZDO_POLL_AFTER so later changed items are not silently skipped"
+      );
+    }
     console.log(
       "no authorized Azure Boards work-item requests found after " +
         after.toISOString()
