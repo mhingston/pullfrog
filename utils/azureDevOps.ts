@@ -136,6 +136,27 @@ interface AzureDevOpsList<T> {
   value: T[];
 }
 
+interface AzureDevOpsRefUpdateResult {
+  name: string;
+  oldObjectId?: string | undefined;
+  newObjectId?: string | undefined;
+  updateStatus?: string | undefined;
+  success?: boolean | undefined;
+  customMessage?: string | undefined;
+}
+
+type AzureDevOpsRefUpdateResponse =
+  | AzureDevOpsRefUpdateResult[]
+  | {
+      value?: AzureDevOpsRefUpdateResult[] | undefined;
+      count?: number | undefined;
+    };
+
+export interface AzureDevOpsFollowUpLock {
+  refName: string;
+  sourceCommitId: string;
+}
+
 function required(name: string, value: string | undefined): string {
   const trimmed = value?.trim();
   if (!trimmed) throw new Error("Azure DevOps context is missing " + name);
@@ -402,6 +423,123 @@ export class AzureDevOpsRepositoryClient {
 
     return results.slice(0, max);
   }
+
+  followUpLockRef(params: {
+    pullRequestId: number;
+    threadId: number;
+    triggerCommentId: number;
+  }): string {
+    for (const [name, value] of [
+      ["pull request id", params.pullRequestId],
+      ["thread id", params.threadId],
+      ["trigger comment id", params.triggerCommentId],
+    ] as const) {
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error("Azure DevOps follow-up lock has invalid " + name);
+      }
+    }
+    return (
+      "refs/heads/pullfrog/locks/follow-up/pr-" +
+      params.pullRequestId +
+      "-thread-" +
+      params.threadId +
+      "-comment-" +
+      params.triggerCommentId
+    );
+  }
+
+  async acquireFollowUpLock(params: {
+    pullRequestId: number;
+    threadId: number;
+    triggerCommentId: number;
+    sourceCommitId: string;
+  }): Promise<
+    | { acquired: true; lock: AzureDevOpsFollowUpLock }
+    | { acquired: false; reason: "claimed"; refName: string }
+  > {
+    const sourceCommitId = params.sourceCommitId.trim().toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(sourceCommitId)) {
+      throw new Error("Azure DevOps follow-up lock requires a valid source commit");
+    }
+
+    const refName = this.followUpLockRef(params);
+    const zeros = "0".repeat(40);
+    const response = await this.#request<AzureDevOpsRefUpdateResponse>(
+      "/refs?api-version=7.1",
+      {
+        method: "POST",
+        body: JSON.stringify([
+          {
+            name: refName,
+            oldObjectId: zeros,
+            newObjectId: sourceCommitId,
+          },
+        ]),
+      }
+    );
+    const result = Array.isArray(response) ? response[0] : response.value?.[0];
+    if (!result) {
+      throw new Error("Azure DevOps follow-up lock update returned no result");
+    }
+
+    if (result.success === true || result.updateStatus === "succeeded") {
+      return {
+        acquired: true,
+        lock: { refName, sourceCommitId },
+      };
+    }
+
+    if (result.updateStatus === "staleOldObjectId") {
+      return { acquired: false, reason: "claimed", refName };
+    }
+
+    throw new Error(
+      "Azure DevOps follow-up lock acquisition failed: " +
+        (result.updateStatus ?? "unknown") +
+        (result.customMessage ? " -- " + result.customMessage : "")
+    );
+  }
+
+  async releaseFollowUpLock(lock: AzureDevOpsFollowUpLock): Promise<void> {
+    if (!/^refs\/heads\/pullfrog\/locks\/follow-up\//.test(lock.refName)) {
+      throw new Error("refusing to release an unexpected Azure DevOps ref");
+    }
+    if (!/^[0-9a-f]{40}$/.test(lock.sourceCommitId)) {
+      throw new Error("Azure DevOps follow-up lock has invalid source commit");
+    }
+
+    const zeros = "0".repeat(40);
+    const response = await this.#request<AzureDevOpsRefUpdateResponse>(
+      "/refs?api-version=7.1",
+      {
+        method: "POST",
+        body: JSON.stringify([
+          {
+            name: lock.refName,
+            oldObjectId: lock.sourceCommitId,
+            newObjectId: zeros,
+          },
+        ]),
+      }
+    );
+    const result = Array.isArray(response) ? response[0] : response.value?.[0];
+    if (!result) {
+      throw new Error("Azure DevOps follow-up lock release returned no result");
+    }
+    if (
+      result.success === true ||
+      result.updateStatus === "succeeded" ||
+      result.updateStatus === "succeededNonExistentRef"
+    ) {
+      return;
+    }
+
+    throw new Error(
+      "Azure DevOps follow-up lock release failed: " +
+        (result.updateStatus ?? "unknown") +
+        (result.customMessage ? " -- " + result.customMessage : "")
+    );
+  }
 }
 
 export class AzureDevOpsClient {
@@ -501,8 +639,6 @@ export class AzureDevOpsClient {
           { method: "DELETE" }
         );
       } catch (error) {
-        // Another concurrent retry may have deleted the same duplicate after
-        // our re-list. Missing is already the converged state.
         if (
           !(error instanceof Error) ||
           !/^Azure DevOps API failed: 404\b/.test(error.message)

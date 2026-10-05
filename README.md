@@ -273,9 +273,9 @@ The trigger is intentionally explicit:
 - `--resolve` closes the originating thread after the reply when that is explicitly requested by the queued run;
 - `--dry-run` prints the answer without posting it.
 
-Each reply carries a hidden marker keyed by **thread ID + triggering comment ID**. A retry first checks for that marker and reuses the existing comment. If two runs race and both create a reply, Pullfrog re-reads the thread, keeps the lowest matching comment ID, and deletes the later duplicate.
+Each reply carries a hidden marker keyed by **thread ID + triggering comment ID**. Before any non-dry-run model execution, Pullfrog also acquires an atomic Azure Git ref lock for that exact request. The lock is a deterministic transient branch under `refs/heads/pullfrog/locks/follow-up/`. Azure creates it only when the ref's old object ID is all zeros; if another worker already created the ref, Azure returns `staleOldObjectId` and the losing worker exits before invoking the model. A retry still checks the final reply marker first and reuses the existing response.
 
-This slice uses **pipeline queue permission as the authorization boundary**: writing `@pullfrog` in a PR does not itself authorize a run. Only users allowed to queue this follow-up pipeline (and, where applicable, set its queue-time parameters) can cause Pullfrog to process a selected comment. Restrict those Azure Pipeline permissions to the people/groups you intend to authorize. The build-service identity still needs repository permission to read and write PR comment threads.
+This slice uses **pipeline queue permission as the authorization boundary**: writing `@pullfrog` in a PR does not itself authorize a run. Only users allowed to queue this follow-up pipeline (and, where applicable, set its queue-time parameters) can cause Pullfrog to process a selected comment. Restrict those Azure Pipeline permissions to the people/groups you intend to authorize. The build-service identity needs repository permission to read/write PR comment threads and `Create branch` on the Pullfrog lock namespace. Azure branch permissions can be scoped by branch folder, so prefer granting that permission only under `pullfrog/locks` rather than repo-wide.
 
 The model remains read-only and tool-free. Pullfrog captures the Azure REST credential, builds PR/thread/diff context, then scrubs `System.AccessToken` / PAT variables before starting OpenCode. Requests to modify code are answered as guidance only in this slice; they do not invoke the #6 write path or #7 autofix flow.
 
@@ -328,9 +328,13 @@ Eligible requests use the same semantics as the manual command: explicit `@pullf
 
 Azure YAML schedules use UTC cron expressions. `always: true` is important here because comments can change without the repository source changing.
 
-**Concurrency note:** this slice provides idempotent reply publication, but it does not yet reserve an event before model execution across separate overlapping workers. Two simultaneous scheduled runs can therefore both spend model work on the same newly discovered comment even though reply convergence prevents duplicate final comments. Use an interval/concurrency policy that avoids overlapping poll jobs until the distributed run-reservation slice lands.
+Follow-up execution is now **atomically serialized before model execution** as well as publication-convergent. The worker tries to create a deterministic lock ref such as `refs/heads/pullfrog/locks/follow-up/pr-42-thread-17-comment-4` using Azure's Git ref update API with `oldObjectId=000...000` and the current PR source commit as `newObjectId`. Azure documents the old/new object comparison specifically to prevent ref-update races; when another worker wins first, the loser receives `staleOldObjectId` and does not run the model.
 
-The immutable actor allowlist is the authorization boundary for **automatic** polling. The manually queued `follow-up` command retains its separate pipeline-queue authorization model.
+The lock has no lease or time-based expiry. That is intentional: a long-running model cannot outlive the mutex and allow duplicate work. Pullfrog releases the ref with an exact old-object CAS after the attempt finishes. If release fails, the deterministic lock remains and later runs fail closed. Likewise, if the acquisition HTTP request becomes ambiguous after the server may have committed it, Pullfrog aborts instead of guessing ownership. An operator may need to remove a leaked lock ref before retrying, but the failure mode is a stuck request rather than duplicate model execution.
+
+Because the lock lives in Git refs rather than PR comments, arbitrary commenters cannot forge or delete coordination state by pasting marker text. Azure's branch-folder permission model can restrict `Create branch` to the `pullfrog/locks` namespace; branch creators receive direct permissions on branches they create, which permits normal cleanup of their own transient lock refs.
+
+The immutable actor allowlist is the authorization boundary for **automatic** polling. The manually queued `follow-up` command retains its separate pipeline-queue authorization model, but both transports share the same atomic ref-lock path so a manual run and scheduled poll cannot process the same request concurrently. `--dry-run` remains write-free and does not create a lock.
 
 ### Safe PR-source writes
 
