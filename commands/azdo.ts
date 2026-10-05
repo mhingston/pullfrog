@@ -1033,6 +1033,555 @@ async function runPollFollowUps(params: {
   }
 }
 
+function azureEnvEnabled(raw: string | undefined): boolean {
+  const value = raw?.trim().toLowerCase();
+  if (!value || value === "false" || value === "disabled" || value === "0") {
+    return false;
+  }
+  if (value === "true" || value === "enabled" || value === "1") {
+    return true;
+  }
+  throw new Error("expected enabled/disabled, true/false, or 1/0");
+}
+
+function azureWorkItemMutations(params: {
+  result: ReturnType<typeof parseAzureWorkItemModelResult>;
+  currentState: string;
+}): WorkItemMutation[] {
+  const mutations: WorkItemMutation[] = [];
+  if (params.result.addTags.length > 0 || params.result.removeTags.length > 0) {
+    mutations.push({
+      kind: "tags",
+      add: params.result.addTags,
+      remove: params.result.removeTags,
+    });
+  }
+  if (
+    params.result.state &&
+    params.result.state.toLowerCase() !== params.currentState.trim().toLowerCase()
+  ) {
+    mutations.push({ kind: "state", state: params.result.state });
+  }
+  return mutations;
+}
+
+async function runWorkItem(params: {
+  model: string | undefined;
+  workItem: string | undefined;
+  comment: string | undefined;
+  mode: string | undefined;
+  allowedActorIds: string | undefined;
+  allowedFields: string | undefined;
+  allowedStates: string | undefined;
+  push: string | undefined;
+  dryRun: boolean;
+}): Promise<void> {
+  const repository = resolveAzureDevOpsRepositoryContext();
+  const workItemId = requireCliPositiveInteger("--work-item", params.workItem);
+  const commentId = params.comment?.trim()
+    ? requireCliPositiveInteger("--comment", params.comment)
+    : undefined;
+  const configuredMode = resolveAzureWorkItemMode({
+    explicit: params.mode,
+    env: process.env,
+  });
+  const allowedActorIds = parseAzureAllowedActorIds(
+    params.allowedActorIds ?? process.env.PULLFROG_AZDO_ALLOWED_ACTOR_IDS
+  );
+  const mutationPolicy = parseAzureWorkItemMutationPolicy({
+    allowedFields:
+      params.allowedFields ??
+      process.env.PULLFROG_AZDO_WORK_ITEM_ALLOWED_FIELDS,
+    allowedStates:
+      params.allowedStates ??
+      process.env.PULLFROG_AZDO_WORK_ITEM_ALLOWED_STATES,
+  });
+  const labelEnabled = azureEnvEnabled(process.env.PULLFROG_LABEL_ENABLED);
+  const effectivePolicy = {
+    ...mutationPolicy,
+    tags: mutationPolicy.tags && labelEnabled,
+  };
+
+  const provider = new AzureDevOpsBoardsProvider(repository);
+  const repositoryClient = new AzureDevOpsRepositoryClient(repository);
+  const [workItem, discussion] = await Promise.all([
+    provider.getWorkItem(workItemId),
+    provider.getComments(workItemId),
+  ]);
+  const selection = selectAzureWorkItemTrigger({
+    workItem,
+    discussion,
+    configuredMode,
+    allowedActorIds,
+    ...(commentId === undefined ? {} : { commentId }),
+  });
+
+  if (selection.kind === "ignored") {
+    console.log("skipping Azure work item: " + selection.reason);
+    return;
+  }
+  if (selection.kind === "already-handled") {
+    console.log(
+      "Azure work item request already handled by comment " + selection.commentId
+    );
+    return;
+  }
+
+  const terms = deriveAzureWorkItemSearchTerms(workItem.title);
+  const candidates =
+    terms.length === 0
+      ? []
+      : (
+          await provider.searchWorkItems({
+            terms,
+            excludeId: workItem.id,
+            max: 20,
+          })
+        ).items;
+
+  const eventMarker = azureWorkItemMarker(selection.trigger.eventKey);
+  if (selection.trigger.mode === "links") {
+    const response = renderAzureWorkItemLinksResponse({
+      workItem,
+      candidates,
+    });
+    if (params.dryRun) {
+      console.log(response);
+      return;
+    }
+
+    const anchorCommitId = await repositoryClient.getBranchObjectId(
+      repository.defaultBranch
+    );
+    if (!anchorCommitId) {
+      throw new Error(
+        "Azure work-item handling requires the repository default branch to exist"
+      );
+    }
+    const lock = await repositoryClient.acquireWorkItemLock({
+      workItemId,
+      revision: workItem.revision,
+      ...(commentId === undefined ? {} : { commentId }),
+      anchorCommitId,
+    });
+    if (!lock.acquired) {
+      console.log(
+        "skipping Azure work item: another worker owns lock " + lock.refName
+      );
+      return;
+    }
+    try {
+      const live = await provider.getWorkItem(workItemId);
+      if (live.revision !== workItem.revision) {
+        throw new Error(
+          "Azure work-item publication blocked: item advanced from revision " +
+            workItem.revision +
+            " to " +
+            live.revision
+        );
+      }
+      await provider.addComment(workItemId, response + "\n\n" + eventMarker);
+      console.log("published Azure work-item related-links response");
+    } finally {
+      await repositoryClient.releaseWorkItemLock(lock.lock).catch((error) => {
+        console.error(
+          "failed to release Azure work-item lock: " +
+            (error instanceof Error ? error.message : String(error))
+        );
+      });
+    }
+    return;
+  }
+
+  const anchorCommitId = await repositoryClient.getBranchObjectId(
+    repository.defaultBranch
+  );
+  if (!anchorCommitId) {
+    throw new Error(
+      "Azure work-item handling requires the repository default branch to exist"
+    );
+  }
+
+  let acquiredLock:
+    | { refName: string; anchorCommitId: string }
+    | undefined;
+  if (!params.dryRun) {
+    const lock = await repositoryClient.acquireWorkItemLock({
+      workItemId,
+      revision: workItem.revision,
+      ...(commentId === undefined ? {} : { commentId }),
+      anchorCommitId,
+    });
+    if (!lock.acquired) {
+      console.log(
+        "skipping Azure work item: another worker owns lock " + lock.refName
+      );
+      return;
+    }
+    acquiredLock = lock.lock;
+  }
+
+  try {
+    if (selection.trigger.mode === "build") {
+      const permission = parseAzureDevOpsPushPermission(
+        params.push ?? process.env.PULLFROG_PUSH
+      );
+      if (permission !== "enabled") {
+        throw new Error(
+          "Azure work-item build mode requires enabled push permission because it creates a Pullfrog-owned branch and PR"
+        );
+      }
+      const branch = azureWorkItemBuildBranch({
+        workItemId,
+        revision: workItem.revision,
+        ...(commentId === undefined ? {} : { commentId }),
+      });
+      const prompt = buildAzureWorkItemBuildPrompt({
+        workItem,
+        discussion,
+        trigger: selection.trigger,
+        candidates,
+        targetBranch: repository.defaultBranch,
+        targetSha: anchorCommitId,
+        instructions: process.env.PULLFROG_ISSUE_INSTRUCTIONS,
+      });
+      if (params.dryRun) {
+        console.log(prompt);
+        return;
+      }
+
+      const createdBranch = await repositoryClient.createPullfrogBranch({
+        branch,
+        targetBranch: repository.defaultBranch,
+        expectedTargetCommitId: anchorCommitId,
+        permission,
+      });
+      let pullRequestCreated = false;
+      try {
+        const gitContext = {
+          ...repository,
+          sourceBranch: branch,
+          sourceCommitId: createdBranch.sha,
+          targetBranch: repository.defaultBranch,
+        };
+        prepareAzureDevOpsPullfrogBranchCheckout({
+          cwd: process.cwd(),
+          ctx: gitContext,
+          permission,
+        });
+
+        const modelOutput = await runAzureRepairModel({
+          model: params.model,
+          prompt,
+          cwd: process.cwd(),
+        });
+        if (modelOutput) console.log(modelOutput);
+
+        if (!gitWorkingTreeStatus(process.cwd())) {
+          await repositoryClient.deletePullfrogBranch({
+            branch,
+            expectedCommitId: createdBranch.sha,
+            permission,
+          });
+          await provider.addComment(
+            workItemId,
+            "Pullfrog inspected the repository but produced no working-tree changes, so no PR was opened.\n\n" +
+              eventMarker
+          );
+          console.log("Azure work-item build produced no changes");
+          return;
+        }
+
+        const liveBeforeCommit = await provider.getWorkItem(workItemId);
+        if (liveBeforeCommit.revision !== workItem.revision) {
+          throw new Error(
+            "Azure work-item build blocked: item advanced from revision " +
+              workItem.revision +
+              " to " +
+              liveBeforeCommit.revision
+          );
+        }
+
+        const committed = await commitAndPushAzureDevOpsPullfrogBranch({
+          cwd: process.cwd(),
+          ctx: gitContext,
+          permission,
+          message: "feat: implement Azure work item #" + workItemId,
+          getLiveSourceCommitId: () =>
+            repositoryClient.getBranchObjectId(branch),
+          verifyOwnership: (candidate) =>
+            repositoryClient.hasPullfrogBranchOwnership(candidate),
+        });
+
+        const createdPr = await repositoryClient.createPullRequestFromPullfrogBranch({
+          sourceBranch: branch,
+          sourceCommitId: committed.pushedSha,
+          targetBranch: repository.defaultBranch,
+          title: workItem.title.slice(0, 400),
+          description:
+            "Implements Azure Boards work item #" +
+            workItemId +
+            ".\n\nGenerated by Pullfrog from authorized work-item request " +
+            selection.trigger.eventKey +
+            ".",
+          permission,
+        });
+        pullRequestCreated = true;
+        const prUrl =
+          repository.repositoryUri.replace(/\/+$/, "") +
+          "/pullrequest/" +
+          createdPr.pullRequestId;
+
+        let relationshipWarning = "";
+        try {
+          const latest = await provider.getWorkItem(workItemId);
+          await provider.updateWorkItem({
+            id: workItemId,
+            expectedRevision: latest.revision,
+            mutations: [
+              {
+                kind: "hyperlink",
+                url: prUrl,
+                comment: "Pullfrog implementation PR #" + createdPr.pullRequestId,
+              },
+            ],
+          });
+        } catch (error) {
+          relationshipWarning =
+            "\n\nPullfrog could not attach the generated PR as a work-item hyperlink: " +
+            (error instanceof Error ? error.message : String(error));
+        }
+
+        await provider.addComment(
+          workItemId,
+          "Pullfrog implemented this request in Azure Repos PR #" +
+            createdPr.pullRequestId +
+            ": " +
+            prUrl +
+            relationshipWarning +
+            "\n\n" +
+            eventMarker
+        );
+        console.log(
+          "created Azure Repos PR #" +
+            createdPr.pullRequestId +
+            " for work item #" +
+            workItemId
+        );
+      } catch (error) {
+        if (!pullRequestCreated) {
+          try {
+            const liveBranch = await repositoryClient.getBranchObjectId(branch);
+            if (liveBranch) {
+              await repositoryClient.deletePullfrogBranch({
+                branch,
+                expectedCommitId: liveBranch,
+                permission,
+              });
+            }
+          } catch (cleanupError) {
+            throw new Error(
+              (error instanceof Error ? error.message : String(error)) +
+                "; additionally failed to clean up Pullfrog work-item branch: " +
+                (cleanupError instanceof Error
+                  ? cleanupError.message
+                  : String(cleanupError)),
+              { cause: error }
+            );
+          }
+        }
+        throw error;
+      }
+      return;
+    }
+
+    const prompt = buildAzureWorkItemPrompt({
+      workItem,
+      discussion,
+      trigger: selection.trigger,
+      candidates,
+      instructions: process.env.PULLFROG_ISSUE_INSTRUCTIONS,
+      labelInstructions: labelEnabled
+        ? process.env.PULLFROG_LABEL_INSTRUCTIONS
+        : undefined,
+      allowTags: effectivePolicy.tags,
+      allowState: effectivePolicy.state,
+      allowedStates: effectivePolicy.allowedStates,
+    });
+    const raw = await runAzureRepositoryReadModel({
+      model: params.model,
+      prompt,
+      cwd: process.cwd(),
+    });
+    const result = parseAzureWorkItemModelResult(raw, effectivePolicy);
+
+    if (params.dryRun) {
+      console.log(
+        JSON.stringify(
+          {
+            response: result.response,
+            addTags: result.addTags,
+            removeTags: result.removeTags,
+            state: result.state ?? null,
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    const live = await provider.getWorkItem(workItemId);
+    if (live.revision !== workItem.revision) {
+      throw new Error(
+        "Azure work-item update blocked: item advanced from revision " +
+          workItem.revision +
+          " to " +
+          live.revision
+      );
+    }
+
+    const mutations = azureWorkItemMutations({
+      result,
+      currentState: workItem.state,
+    });
+    if (mutations.length > 0) {
+      await provider.updateWorkItem({
+        id: workItemId,
+        expectedRevision: workItem.revision,
+        mutations,
+      });
+    }
+    await provider.addComment(
+      workItemId,
+      result.response + "\n\n" + eventMarker
+    );
+    console.log(
+      "published Azure work-item " +
+        selection.trigger.mode +
+        " response" +
+        (mutations.length > 0
+          ? " with " + mutations.length + " allowlisted mutation(s)"
+          : "")
+    );
+  } finally {
+    if (acquiredLock) {
+      await repositoryClient.releaseWorkItemLock(acquiredLock).catch((error) => {
+        console.error(
+          "failed to release Azure work-item lock: " +
+            (error instanceof Error ? error.message : String(error))
+        );
+      });
+    }
+  }
+}
+
+async function runPollWorkItems(params: {
+  model: string | undefined;
+  after: string | undefined;
+  allowedActorIds: string | undefined;
+  max: string | undefined;
+  mode: string | undefined;
+  allowedFields: string | undefined;
+  allowedStates: string | undefined;
+  push: string | undefined;
+  dryRun: boolean;
+}): Promise<void> {
+  const repository = resolveAzureDevOpsRepositoryContext();
+  const after = parseAzurePollAfter(
+    params.after ?? process.env.PULLFROG_AZDO_POLL_AFTER
+  );
+  const allowedActorIds = parseAzureAllowedActorIds(
+    params.allowedActorIds ?? process.env.PULLFROG_AZDO_ALLOWED_ACTOR_IDS
+  );
+  const max = parseAzurePollMax(params.max);
+  const configuredMode = resolveAzureWorkItemMode({
+    explicit: params.mode,
+    env: process.env,
+  });
+  const provider = new AzureDevOpsBoardsProvider(repository);
+  const workItems = await provider.listChangedWorkItems({
+    after,
+    max: 500,
+  });
+  const candidates: AzureWorkItemPollingCandidate[] = [];
+
+  for (const workItem of workItems) {
+    const discussion = await provider.getComments(workItem.id);
+    const itemCandidates = selectAzureWorkItemPollingCandidates({
+      workItem,
+      discussion,
+      allowedActorIds,
+      after,
+    });
+    candidates.push(
+      ...itemCandidates.filter(
+        (candidate) =>
+          candidate.commentId !== undefined || configuredMode !== "none"
+      )
+    );
+  }
+
+  const selected = candidates
+    .sort((left, right) => {
+      const byTime = left.publishedAt.localeCompare(right.publishedAt);
+      if (byTime !== 0) return byTime;
+      if (left.workItemId !== right.workItemId) {
+        return left.workItemId - right.workItemId;
+      }
+      return (left.commentId ?? 0) - (right.commentId ?? 0);
+    })
+    .slice(0, max);
+
+  if (selected.length === 0) {
+    console.log(
+      "no authorized Azure Boards work-item requests found after " +
+        after.toISOString()
+    );
+    return;
+  }
+
+  const failures: string[] = [];
+  for (const candidate of selected) {
+    const label =
+      "work item #" +
+      candidate.workItemId +
+      (candidate.commentId === undefined
+        ? " created event"
+        : ", comment " + candidate.commentId);
+    try {
+      await runWorkItem({
+        model: params.model,
+        workItem: String(candidate.workItemId),
+        ...(candidate.commentId === undefined
+          ? { comment: undefined }
+          : { comment: String(candidate.commentId) }),
+        mode: params.mode,
+        allowedActorIds: params.allowedActorIds,
+        allowedFields: params.allowedFields,
+        allowedStates: params.allowedStates,
+        push: params.push,
+        dryRun: params.dryRun,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(label + ": " + message.slice(0, 500));
+      console.error("Azure work-item polling failed for " + label + ": " + message);
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      "Azure work-item polling failed for " +
+        failures.length +
+        " request" +
+        (failures.length === 1 ? "" : "s") +
+        ":\n- " +
+        failures.join("\n- ")
+    );
+  }
+}
+
 async function runCheckout(params: { push: string | undefined }): Promise<void> {
   const ctx = resolveAzureDevOpsContext();
   const permission = parseAzureDevOpsPushPermission(
