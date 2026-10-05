@@ -320,3 +320,102 @@ describe("AzureDevOpsBoardsProvider search", () => {
     ).rejects.toThrow("letters, digits");
   });
 });
+
+
+describe("AzureDevOpsBoardsProvider changed-item polling", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keyset-paginates beyond 500-era single-page limits with bounded GET concurrency", async () => {
+    let activeGets = 0;
+    let maxActiveGets = 0;
+    const wiqlQueries: string[] = [];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/_apis/wit/wiql?")) {
+        const query = String(JSON.parse(String(init?.body)).query);
+        wiqlQueries.push(query);
+        const cursorMatch = query.match(/\[System\.Id\] > (\d+)/);
+        const cursor = cursorMatch ? Number(cursorMatch[1]) : 0;
+        if (cursor === 0) {
+          return jsonResponse({
+            workItems: Array.from({ length: 101 }, (_, index) => ({ id: index + 1 })),
+          });
+        }
+        if (cursor === 100) {
+          return jsonResponse({
+            workItems: Array.from({ length: 101 }, (_, index) => ({ id: index + 101 })),
+          });
+        }
+        if (cursor === 200) {
+          return jsonResponse({
+            workItems: Array.from({ length: 5 }, (_, index) => ({ id: index + 201 })),
+          });
+        }
+        throw new Error("unexpected polling cursor " + cursor);
+      }
+
+      const match = url.match(/\/workitems\/(\d+)\?/i);
+      if (!match) throw new Error("unexpected URL " + url);
+      const id = Number(match[1]);
+      activeGets++;
+      maxActiveGets = Math.max(maxActiveGets, activeGets);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      activeGets--;
+      return jsonResponse(
+        rawWorkItem({
+          id,
+          fields: {
+            ...(rawWorkItem().fields as Record<string, unknown>),
+            "System.Title": "Changed " + id,
+          },
+        })
+      );
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new AzureDevOpsBoardsProvider(ctx);
+    const result = await provider.listChangedWorkItems({
+      after: new Date("2026-10-05T00:00:00Z"),
+      max: 205,
+    });
+
+    expect(result.incomplete).toBe(false);
+    expect(result.items).toHaveLength(205);
+    expect(result.items[0]?.id).toBe(1);
+    expect(result.items[204]?.id).toBe(205);
+    expect(wiqlQueries).toHaveLength(3);
+    expect(wiqlQueries[1]).toContain("[System.Id] > 100");
+    expect(wiqlQueries[2]).toContain("[System.Id] > 200");
+    expect(maxActiveGets).toBeGreaterThan(1);
+    expect(maxActiveGets).toBeLessThanOrEqual(8);
+  });
+
+  it("reports when the explicit changed-item scan bound is reached", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/_apis/wit/wiql?")) {
+        return jsonResponse({
+          workItems: [{ id: 1 }, { id: 2 }, { id: 3 }],
+        });
+      }
+      const match = url.match(/\/workitems\/(\d+)\?/i);
+      const id = Number(match?.[1] ?? 0);
+      return jsonResponse(rawWorkItem({ id }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new AzureDevOpsBoardsProvider(ctx);
+
+    await expect(
+      provider.listChangedWorkItems({
+        after: new Date("2026-10-05T00:00:00Z"),
+        max: 2,
+      })
+    ).resolves.toMatchObject({
+      incomplete: true,
+      items: [{ id: 1 }, { id: 2 }],
+    });
+  });
+});
