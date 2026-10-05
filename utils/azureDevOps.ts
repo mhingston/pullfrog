@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   type AzureDevOpsPushPermission,
   validateAzureDevOpsBranchName,
+  validateAzureDevOpsPullfrogBranch,
 } from "./azureDevOpsGit.ts";
 
 export const AZDO_REVIEW_MARKER_PREFIX = "<!-- pullfrog-azure-devops-review:";
@@ -20,6 +21,15 @@ function findingFingerprint(path: string, line: number): string {
     .update(path.replace(/^\/+/, "") + ":" + line)
     .digest("hex")
     .slice(0, 16);
+}
+
+export function azureDevOpsBranchOwnershipBranch(branch: string): string {
+  const validated = validateAzureDevOpsPullfrogBranch(branch);
+  const fingerprint = createHash("sha256")
+    .update(validated)
+    .digest("hex")
+    .slice(0, 24);
+  return "pullfrog/owners/" + fingerprint;
 }
 
 export function azureDevOpsFindingMarker(
@@ -418,6 +428,220 @@ export class AzureDevOpsRepositoryClient {
     return exact?.objectId?.toLowerCase();
   }
 
+  async createPullfrogBranch(params: {
+    branch: string;
+    targetBranch: string;
+    permission: AzureDevOpsPushPermission;
+    expectedTargetCommitId?: string | undefined;
+  }): Promise<{ branch: string; sha: string; ownershipBranch: string }> {
+    if (params.permission !== "enabled") {
+      throw new Error(
+        "Azure DevOps new-branch creation requires enabled push permission"
+      );
+    }
+
+    const branch = validateAzureDevOpsPullfrogBranch(params.branch);
+    const targetBranch = validateAzureDevOpsBranchName(params.targetBranch);
+    if (branch === this.#ctx.defaultBranch || branch === targetBranch) {
+      throw new Error(
+        "Azure DevOps new-branch creation blocked: source cannot be the target/default branch"
+      );
+    }
+    if (targetBranch.startsWith("pullfrog/locks/")) {
+      throw new Error(
+        "Azure DevOps new-branch creation blocked: lock refs cannot be branch bases"
+      );
+    }
+
+    const targetSha = await this.getBranchObjectId(targetBranch);
+    if (!targetSha) {
+      throw new Error(
+        "Azure DevOps new-branch creation blocked: target branch does not exist: " +
+          targetBranch
+      );
+    }
+
+    if (params.expectedTargetCommitId !== undefined) {
+      const expected = params.expectedTargetCommitId.trim().toLowerCase();
+      if (!/^[0-9a-f]{40}$/.test(expected)) {
+        throw new Error(
+          "Azure DevOps new-branch creation requires a valid expected target commit"
+        );
+      }
+      if (targetSha !== expected) {
+        throw new Error(
+          "Azure DevOps new-branch creation blocked: target advanced from " +
+            expected.slice(0, 12) +
+            " to " +
+            targetSha.slice(0, 12)
+        );
+      }
+    }
+
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(branch);
+    const zeros = "0".repeat(40);
+    const createRef = async (name: string): Promise<AzureDevOpsRefUpdateResult> => {
+      const response = await this.#request<AzureDevOpsRefUpdateResponse>(
+        "/refs?api-version=7.1",
+        {
+          method: "POST",
+          body: JSON.stringify([
+            {
+              name: "refs/heads/" + name,
+              oldObjectId: zeros,
+              newObjectId: targetSha,
+            },
+          ]),
+        }
+      );
+      const result = Array.isArray(response) ? response[0] : response.value?.[0];
+      if (!result) {
+        throw new Error(
+          "Azure DevOps ref creation returned no result for " + name
+        );
+      }
+      return result;
+    };
+
+    const branchResult = await createRef(branch);
+    if (!(branchResult.success === true || branchResult.updateStatus === "succeeded")) {
+      if (branchResult.updateStatus === "staleOldObjectId") {
+        throw new Error(
+          "Azure DevOps new-branch creation blocked: branch already exists: " +
+            branch
+        );
+      }
+      throw new Error(
+        "Azure DevOps new-branch creation failed: " +
+          (branchResult.updateStatus ?? "unknown") +
+          (branchResult.customMessage ? " -- " + branchResult.customMessage : "")
+      );
+    }
+
+    let ownershipCreated = false;
+    try {
+      const ownershipResult = await createRef(ownershipBranch);
+      if (
+        !(
+          ownershipResult.success === true ||
+          ownershipResult.updateStatus === "succeeded"
+        )
+      ) {
+        throw new Error(
+          "Azure DevOps branch ownership creation failed: " +
+            (ownershipResult.updateStatus ?? "unknown") +
+            (ownershipResult.customMessage
+              ? " -- " + ownershipResult.customMessage
+              : "")
+        );
+      }
+      ownershipCreated = true;
+    } finally {
+      if (!ownershipCreated) {
+        try {
+          await this.#request<AzureDevOpsRefUpdateResponse>(
+            "/refs?api-version=7.1",
+            {
+              method: "POST",
+              body: JSON.stringify([
+                {
+                  name: "refs/heads/" + branch,
+                  oldObjectId: targetSha,
+                  newObjectId: zeros,
+                },
+              ]),
+            }
+          );
+        } catch {
+          // Best effort only. The caller still fails closed and the reserved
+          // branch remains identifiable for operator cleanup.
+        }
+      }
+    }
+
+    const [liveBranch, liveOwnership] = await Promise.all([
+      this.getBranchObjectId(branch),
+      this.getBranchObjectId(ownershipBranch),
+    ]);
+    if (liveBranch !== targetSha || liveOwnership !== targetSha) {
+      throw new Error(
+        "Azure DevOps new-branch creation could not verify branch ownership state"
+      );
+    }
+
+    return { branch, sha: targetSha, ownershipBranch };
+  }
+
+  async deletePullfrogBranch(params: {
+    branch: string;
+    expectedCommitId: string;
+    permission: AzureDevOpsPushPermission;
+  }): Promise<void> {
+    if (params.permission !== "enabled") {
+      throw new Error(
+        "Azure DevOps Pullfrog branch deletion requires enabled push permission"
+      );
+    }
+    const branch = validateAzureDevOpsPullfrogBranch(params.branch);
+    const expected = params.expectedCommitId.trim().toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(expected)) {
+      throw new Error(
+        "Azure DevOps Pullfrog branch deletion requires a valid expected commit"
+      );
+    }
+
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(branch);
+    const ownershipSha = await this.getBranchObjectId(ownershipBranch);
+    if (!ownershipSha) {
+      throw new Error(
+        "Azure DevOps Pullfrog branch deletion blocked: ownership proof is missing"
+      );
+    }
+
+    const zeros = "0".repeat(40);
+    const removeRef = async (
+      name: string,
+      oldObjectId: string
+    ): Promise<void> => {
+      const response = await this.#request<AzureDevOpsRefUpdateResponse>(
+        "/refs?api-version=7.1",
+        {
+          method: "POST",
+          body: JSON.stringify([
+            {
+              name: "refs/heads/" + name,
+              oldObjectId,
+              newObjectId: zeros,
+            },
+          ]),
+        }
+      );
+      const result = Array.isArray(response) ? response[0] : response.value?.[0];
+      if (!result) {
+        throw new Error(
+          "Azure DevOps ref deletion returned no result for " + name
+        );
+      }
+      if (
+        result.success === true ||
+        result.updateStatus === "succeeded" ||
+        result.updateStatus === "succeededNonExistentRef"
+      ) {
+        return;
+      }
+      throw new Error(
+        "Azure DevOps ref deletion failed for " +
+          name +
+          ": " +
+          (result.updateStatus ?? "unknown") +
+          (result.customMessage ? " -- " + result.customMessage : "")
+      );
+    };
+
+    await removeRef(branch, expected);
+    await removeRef(ownershipBranch, ownershipSha);
+  }
+
   async createPullRequestFromPullfrogBranch(params: {
     sourceBranch: string;
     sourceCommitId: string;
@@ -432,13 +656,8 @@ export class AzureDevOpsRepositoryClient {
       );
     }
 
-    const sourceBranch = validateAzureDevOpsBranchName(params.sourceBranch);
+    const sourceBranch = validateAzureDevOpsPullfrogBranch(params.sourceBranch);
     const targetBranch = validateAzureDevOpsBranchName(params.targetBranch);
-    if (!sourceBranch.startsWith("pullfrog/branches/")) {
-      throw new Error(
-        "Azure DevOps PR creation requires the reserved Pullfrog source namespace pullfrog/branches/"
-      );
-    }
     if (sourceBranch === this.#ctx.defaultBranch) {
       throw new Error(
         "Azure DevOps PR creation blocked: source branch is the repository default branch"
@@ -469,6 +688,14 @@ export class AzureDevOpsRepositoryClient {
     if (params.description.length > 4000) {
       throw new Error(
         "Azure DevOps PR description must be 4000 characters or fewer"
+      );
+    }
+
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(sourceBranch);
+    const ownershipSha = await this.getBranchObjectId(ownershipBranch);
+    if (!ownershipSha) {
+      throw new Error(
+        "Azure DevOps PR creation blocked: Pullfrog branch ownership proof is missing"
       );
     }
 
