@@ -338,20 +338,22 @@ The immutable actor allowlist is the authorization boundary for **automatic** po
 
 ### Safe PR-source writes
 
-The first Azure write capability is intentionally narrow: it can prepare and finalize changes on the **current validated PR source branch only**. It does not yet create arbitrary branches or PRs, and it does not itself run a code-writing agent. That separation gives later autofix work a credential-safe substrate without granting the model direct repository credentials.
+Azure writes use the same permission vocabulary as Pullfrog's GitHub runtime: `disabled`, `restricted`, and `enabled`, defaulting to `restricted`.
 
-A pipeline can bracket a trusted code-writing step like this:
+- `restricted` can only update the **current validated PR source branch**.
+- `enabled` includes that behavior and can additionally create/write branches under the reserved `pullfrog/branches/` namespace, then open a PR from one of those Pullfrog-owned branches.
+- neither mode permits direct writes to the repository default branch or current PR target branch.
+
+For an existing PR, a pipeline can bracket a trusted code-writing step like this:
 
 ```yaml
-  # Run after the review step while System.AccessToken is still available only
-  # to Pullfrog itself.
   - script: npx --yes pullfrog azdo checkout --push restricted
     displayName: Prepare Pullfrog write checkout
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
-  # Your code-writing step goes here. Do NOT map System.AccessToken, an Azure
-  # DevOps PAT, or another repository credential into this process.
+  # Do NOT map System.AccessToken, an Azure DevOps PAT, or another repository
+  # credential into the code-writing/model process.
   - script: ./run-your-code-writing-step.sh
     displayName: Produce working-tree changes
 
@@ -363,11 +365,54 @@ A pipeline can bracket a trusted code-writing step like this:
 
 `azdo checkout` verifies that `origin` is the Azure repository identified by `BUILD_REPOSITORY_URI`, fetches the PR source with parent-owned authentication, requires its remote tip to equal `System.PullRequest.SourceCommitId`, checks out that exact source commit, and removes checkout-persisted `http.*.extraheader` / credential-helper configuration.
 
-`azdo commit` then requires the working tree to still be on that PR source with the validated commit as `HEAD`, rechecks the live PR source through the Azure REST API, re-fetches the remote source, creates the commit itself, and pushes with an explicit lease requiring the remote source ref to still equal the validated SHA. The generated commit must be a direct child of that SHA, so the lease acts as compare-and-swap protection rather than permitting a history rewrite. Any concurrent update or force-reset therefore fails closed instead of being overwritten.
+`azdo commit` then requires the working tree to still be on that PR source with the validated commit as `HEAD`, rechecks the live PR source through the Azure REST API, re-fetches the remote source, creates the commit itself, and pushes with an explicit lease requiring the remote source ref to still equal the validated SHA. The generated commit must be a direct child of that SHA, so the lease acts as compare-and-swap protection rather than permitting a history rewrite.
 
-The write permission vocabulary matches Pullfrog's GitHub runtime: `disabled`, `restricted`, and `enabled`, defaulting to `restricted`. In this PR-source-only slice, both `restricted` and `enabled` authorize only the current PR source; neither permits a direct target/default-branch write. Authenticated git runs in an isolated environment with hooks disabled while credentials are live. Changed Git-LFS files are rejected for now because safely supporting them requires the LFS pre-push hook.
+For new Pullfrog work, `enabled` supports a complete branch-to-PR flow:
 
-Use `--dry-run` with `azdo commit` to run the stale/ref/change preflight without creating a commit or pushing.
+```bash
+# Creates the remote branch at the current target SHA using Azure's ref CAS API,
+# creates a companion ownership ref, fetches it with parent-owned credentials,
+# and prepares the local checkout.
+pullfrog azdo branch-create \
+  --push enabled \
+  --branch pullfrog/branches/fix-123 \
+  --target main
+
+# Run the code-writing/model process here WITHOUT Azure repository credentials.
+
+# The expected SHA is the SHA printed by branch-create. Pullfrog creates the
+# commit itself and pushes with an explicit lease.
+pullfrog azdo branch-commit \
+  --push enabled \
+  --branch pullfrog/branches/fix-123 \
+  --target main \
+  --expected <branch-create-sha> \
+  --message "fix: apply Pullfrog changes"
+
+# Use the SHA printed by branch-commit.
+pullfrog azdo create-pr \
+  --push enabled \
+  --branch pullfrog/branches/fix-123 \
+  --target main \
+  --expected <branch-commit-sha> \
+  --title "fix: apply Pullfrog changes"
+```
+
+New-branch creation is not authorized by branch naming alone. Pullfrog creates a deterministic companion ownership ref under `pullfrog/owners/` and `create-pr` requires that proof before it will open a PR. Branch creation itself uses `oldObjectId=000...000`, so an existing/racing branch fails closed. PR creation revalidates the exact source SHA before and after Azure's non-conditional create request; if the source moves during creation, Pullfrog immediately abandons the new PR.
+
+Authenticated git always runs in an isolated environment with hooks and credential helpers disabled while the Azure credential is live. Changed Git-LFS files remain unsupported because safely pushing them requires the LFS pre-push hook.
+
+Use `--dry-run` with `azdo commit` or `azdo branch-commit` to run the stale/ref/change preflight without creating a commit or pushing.
+
+The destructive authenticated-git integration test is opt-in and should point only at a disposable Azure Repos repository:
+
+```bash
+export PULLFROG_AZDO_INTEGRATION=1
+export PULLFROG_AZDO_INTEGRATION_REPOSITORY_ID="$BUILD_REPOSITORY_ID"
+pnpm test:azdo-integration
+```
+
+The test creates a temporary Pullfrog-owned branch, authenticated-fetches it, commits/pushes through the production CAS path, verifies the remote SHA, then deletes the branch and ownership ref. The extra repository-ID confirmation prevents accidentally enabling the destructive test against an unintended repository.
 
 ### Merge-gating status
 
