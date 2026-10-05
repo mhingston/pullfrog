@@ -523,13 +523,59 @@ function parseStringArray(value: unknown, name: string): string[] {
   });
 }
 
+function extractAzureWorkItemJson(raw: string): string {
+  const fenced = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  const lastFence = fenced.at(-1)?.[1]?.trim();
+  if (lastFence) return lastFence;
+
+  const trimmed = raw.trim();
+  try {
+    JSON.parse(trimmed);
+    return trimmed;
+  } catch {
+    // Fall through to extracting the last complete JSON object.
+  }
+
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  let lastObject: string | undefined;
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{") {
+      if (depth === 0) start = index;
+      depth++;
+      continue;
+    }
+    if (char === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        lastObject = raw.slice(start, index + 1);
+        start = -1;
+      }
+    }
+  }
+  return lastObject ?? trimmed;
+}
+
 export function parseAzureWorkItemModelResult(
   raw: string,
   policy: AzureWorkItemMutationPolicy
 ): AzureWorkItemModelResult {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(extractAzureWorkItemJson(raw));
   } catch {
     throw new Error("Azure work-item model did not return valid JSON");
   }
