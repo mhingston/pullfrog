@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -157,6 +157,57 @@ describe("Azure DevOps enabled branch ownership", () => {
 });
 
 describe("Azure DevOps isolated worktree", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("blocks a configured smudge filter before creating a worktree", async () => {
+    const { root } = makeRepo();
+    const marker = join(root, "filter-ran");
+    try {
+      writeFileSync(join(root, ".gitattributes"), "base.txt filter=evil\n");
+      git(root, ["add", ".gitattributes"]);
+      git(root, ["commit", "-m", "add filter attribute"]);
+      git(root, ["config", "--local", "filter.evil.smudge", "touch " + marker]);
+
+      await expect(
+        withAzureDevOpsIsolatedWorktree({ cwd: root, run: async () => undefined })
+      ).rejects.toThrow("select configured Git filter");
+
+      expect(existsSync(marker)).toBe(false);
+      expect(git(root, ["worktree", "list", "--porcelain"])).not.toContain(
+        "pullfrog-azdo-worktree-"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a global Git filter selected by the source tree", async () => {
+    const { root } = makeRepo();
+    const marker = join(root, "filter-ran");
+    const globalConfig = join(root, "global.gitconfig");
+    try {
+      writeFileSync(join(root, ".gitattributes"), "base.txt filter=evil\n");
+      git(root, ["add", ".gitattributes"]);
+      git(root, ["commit", "-m", "add filter attribute"]);
+      execFileSync(
+        "git",
+        ["config", "--file", globalConfig, "filter.evil.smudge", "touch " + marker],
+        { cwd: root, encoding: "utf-8" }
+      );
+      vi.stubEnv("GIT_CONFIG_GLOBAL", globalConfig);
+
+      await expect(
+        withAzureDevOpsIsolatedWorktree({ cwd: root, run: async () => undefined })
+      ).rejects.toThrow("select configured Git filter");
+
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("discards candidate changes without changing the shared checkout", async () => {
     const { root, sha } = makeRepo();
     try {
@@ -190,7 +241,7 @@ describe("Azure DevOps merge repair safety", () => {
     try {
       git(root, ["config", "--local", "merge.evil.driver", "sh -c 'touch /tmp/pwned'"]);
       expect(() => assertAzureDevOpsMergeConfigSafe(root)).toThrow(
-        "executable/local merge config"
+        "executable Git configuration"
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -335,6 +386,32 @@ describe("Azure DevOps credential isolation", () => {
 });
 
 describe("Azure DevOps stale write guards", () => {
+  it("blocks a configured clean filter before staging changed files", async () => {
+    const { root, sha } = makeRepo();
+    const marker = join(root, "filter-ran");
+    try {
+      writeFileSync(join(root, ".gitattributes"), "base.txt filter=evil\n");
+      writeFileSync(join(root, "base.txt"), "changed\n");
+      git(root, ["config", "--local", "filter.evil.clean", "touch " + marker]);
+
+      await expect(
+        commitAndPushAzureDevOpsSource({
+          cwd: root,
+          ctx: context(sha),
+          permission: "restricted",
+          message: "fix: update base",
+          getLiveSourceCommitId: async () => sha,
+        })
+      ).rejects.toThrow("select configured Git filter");
+
+      expect(existsSync(marker)).toBe(false);
+      expect(git(root, ["rev-parse", "HEAD"]).toLowerCase()).toBe(sha);
+      expect(git(root, ["status", "--porcelain"])).toContain("base.txt");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("fails before authenticated git when the live PR source advanced", async () => {
     const { root, sha } = makeRepo();
     const newer = "fedcba9876543210fedcba9876543210fedcba98";

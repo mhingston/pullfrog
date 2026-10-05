@@ -55,10 +55,127 @@ function git(cwd: string, args: string[], options?: { env?: NodeJS.ProcessEnv })
   }).trimEnd();
 }
 
+type GitFilterCommand = "clean" | "smudge" | "process";
+
+function configuredGitFilterConfigKeys(
+  cwd: string,
+  commands: readonly GitFilterCommand[]
+): string[] {
+  const pattern = "^filter\\..*\\.(" + commands.join("|") + ")$";
+  const result = spawnSync("git", ["config", "--name-only", "--get-regexp", pattern], {
+    cwd,
+    encoding: "utf-8",
+    env: credentialFreeEnv(),
+  });
+  if (result.status === 1) return [];
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(
+      "failed to inspect Git filter configuration: " +
+        String(result.stderr || result.stdout || "").trim()
+    );
+  }
+  return String(result.stdout || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function configuredGitFilterDrivers(
+  cwd: string,
+  commands: readonly GitFilterCommand[]
+): Set<string> {
+  const drivers = new Set<string>();
+  for (const key of configuredGitFilterConfigKeys(cwd, commands)) {
+    const match = key.match(/^filter\.(.+)\.(clean|smudge|process)$/i);
+    if (match && commands.includes(match[2]!.toLowerCase() as GitFilterCommand)) {
+      drivers.add(match[1]!.toLowerCase());
+    }
+  }
+  return drivers;
+}
+
+function assertNoConfiguredGitFiltersForFiles(params: {
+  cwd: string;
+  files: string[];
+  commands: readonly GitFilterCommand[];
+  operation: string;
+  cachedAttributes?: boolean | undefined;
+  env?: NodeJS.ProcessEnv | undefined;
+}): void {
+  const configuredDrivers = configuredGitFilterDrivers(params.cwd, params.commands);
+  if (configuredDrivers.size === 0 || params.files.length === 0) return;
+
+  const matches: string[] = [];
+  for (let i = 0; i < params.files.length; i += 100) {
+    const batch = params.files.slice(i, i + 100);
+    const attributes = git(
+      params.cwd,
+      [
+        "check-attr",
+        ...(params.cachedAttributes ? ["--cached"] : []),
+        "-z",
+        "filter",
+        "--",
+        ...batch,
+      ],
+      params.env ? { env: params.env } : undefined
+    );
+    const fields = splitNullList(attributes);
+    for (let field = 0; field + 2 < fields.length; field += 3) {
+      const path = fields[field]!;
+      const attribute = fields[field + 1]!;
+      const driver = fields[field + 2]!.toLowerCase();
+      if (attribute === "filter" && configuredDrivers.has(driver)) {
+        matches.push(path + " (filter=" + driver + ")");
+      }
+    }
+  }
+
+  if (matches.length > 0) {
+    throw new Error(
+      "Azure DevOps " +
+        params.operation +
+        " blocked: file(s) select configured Git filter(s):\n" +
+        matches.join("\n")
+    );
+  }
+}
+
+function assertNoConfiguredGitFiltersInTree(params: {
+  cwd: string;
+  treeish: string;
+  commands: readonly GitFilterCommand[];
+  operation: string;
+}): void {
+  const isolated = mkdtempSync(join(tmpdir(), "pullfrog-azdo-filter-check-"));
+  const env = { GIT_INDEX_FILE: join(isolated, "index") };
+  try {
+    git(params.cwd, ["read-tree", params.treeish], { env });
+    const files = splitNullList(git(params.cwd, ["ls-files", "-z"], { env }));
+    assertNoConfiguredGitFiltersForFiles({
+      cwd: params.cwd,
+      files,
+      commands: params.commands,
+      operation: params.operation,
+      cachedAttributes: true,
+      env,
+    });
+  } finally {
+    rmSync(isolated, { recursive: true, force: true });
+  }
+}
+
 export async function withAzureDevOpsIsolatedWorktree<T>(params: {
   cwd: string;
   run: (cwd: string) => Promise<T>;
 }): Promise<T> {
+  assertNoConfiguredGitFiltersInTree({
+    cwd: params.cwd,
+    treeish: "HEAD",
+    commands: ["smudge", "process"],
+    operation: "isolated worktree checkout",
+  });
   const root = mkdtempSync(join(tmpdir(), "pullfrog-azdo-worktree-"));
   const worktree = join(root, "checkout");
   let added = false;
@@ -236,16 +353,16 @@ export function scrubAzureDevOpsGitCredentials(cwd: string): void {
 }
 
 export function assertAzureDevOpsMergeConfigSafe(cwd: string): void {
-  const dangerous = [
+  const dangerous = new Set([
     ...localConfigKeys(cwd, "^merge\\..*\\.driver$"),
-    ...localConfigKeys(cwd, "^filter\\..*\\.(clean|smudge|process)$"),
     ...localConfigKeys(cwd, "^core\\.attributesfile$"),
     ...localConfigKeys(cwd, "^core\\.hookspath$"),
-  ];
-  if (dangerous.length > 0) {
+    ...configuredGitFilterConfigKeys(cwd, ["clean", "smudge", "process"]),
+  ]);
+  if (dangerous.size > 0) {
     throw new Error(
-      "Azure DevOps merge repair blocked by executable/local merge config: " +
-        dangerous.join(", ")
+      "Azure DevOps merge repair blocked by executable Git configuration: " +
+        [...dangerous].join(", ")
     );
   }
 }
@@ -422,6 +539,12 @@ export function prepareAzureDevOpsSourceCheckout(params: {
     );
   }
 
+  assertNoConfiguredGitFiltersInTree({
+    cwd: params.cwd,
+    treeish: expected,
+    commands: ["smudge", "process"],
+    operation: "source checkout",
+  });
   git(params.cwd, ["checkout", "-B", branch, expected]);
   git(params.cwd, ["config", "--local", "branch." + branch + ".remote", "origin"]);
   git(params.cwd, [
@@ -781,6 +904,12 @@ export async function commitAndPushAzureDevOpsMergeResolution(params: {
       }
     }
 
+    assertNoConfiguredGitFiltersForFiles({
+      cwd: params.cwd,
+      files: expectedConflictFiles,
+      commands: ["clean", "process"],
+      operation: "merge conflict staging",
+    });
     git(params.cwd, ["add", "-A", "--", ...expectedConflictFiles]);
   }
 
@@ -832,6 +961,12 @@ export async function commitAndPushAzureDevOpsMergeResolution(params: {
     throw new Error("Azure DevOps merge commit blocked: merge has no working-tree changes");
   }
   assertNoChangedLfsFiles(params.cwd, files);
+  assertNoConfiguredGitFiltersForFiles({
+    cwd: params.cwd,
+    files,
+    commands: ["clean", "process"],
+    operation: "merge commit staging",
+  });
 
   if (params.dryRun) {
     return {
@@ -983,6 +1118,18 @@ export async function commitAndPushAzureDevOpsSource(params: {
     );
   }
 
+  const files = changedFiles(params.cwd);
+  if (files.length === 0) {
+    throw new Error("Azure DevOps commit blocked: working tree has no changes");
+  }
+  assertNoChangedLfsFiles(params.cwd, files);
+  assertNoConfiguredGitFiltersForFiles({
+    cwd: params.cwd,
+    files,
+    commands: ["clean", "process"],
+    operation: "commit staging",
+  });
+
   const live = (await params.getLiveSourceCommitId())?.toLowerCase();
   if (!live) {
     throw new Error(
@@ -1011,12 +1158,6 @@ export async function commitAndPushAzureDevOpsSource(params: {
         remote.slice(0, 12)
     );
   }
-
-  const files = changedFiles(params.cwd);
-  if (files.length === 0) {
-    throw new Error("Azure DevOps commit blocked: working tree has no changes");
-  }
-  assertNoChangedLfsFiles(params.cwd, files);
 
   if (params.dryRun) {
     return {
