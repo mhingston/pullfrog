@@ -1,4 +1,5 @@
 import {
+  requireAzureDevOpsTrustedIdentityId,
   type AzureDevOpsComment,
   type AzureDevOpsThread,
 } from "../utils/azureDevOps.ts";
@@ -106,8 +107,12 @@ export function selectAzurePollingCandidates(params: {
   threads: AzureDevOpsThread[];
   allowedActorIds: Set<string>;
   after: Date;
+  trustedAuthorId: string;
   max?: number | undefined;
 }): AzurePollingCandidate[] {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    params.trustedAuthorId
+  );
   const max = params.max ?? 10;
   if (!Number.isInteger(max) || max <= 0 || max > 50) {
     throw new Error("Azure follow-up polling max must be between 1 and 50");
@@ -130,6 +135,7 @@ export function selectAzurePollingCandidates(params: {
       const selection = selectAzureFollowUp({
         thread,
         commentId: comment.id,
+        trustedAuthorId,
       });
       if (selection.kind !== "trigger") continue;
 

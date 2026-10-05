@@ -14,6 +14,8 @@ import {
   stripRefsHeads,
 } from "./azureDevOps.ts";
 
+const trustedAuthorId = "pullfrog-service-id";
+
 const baseEnv = {
   SYSTEM_TEAMFOUNDATIONCOLLECTIONURI: "https://dev.azure.com/acme",
   SYSTEM_TEAMPROJECT: "Platform",
@@ -1317,7 +1319,7 @@ describe("AzureDevOpsClient.upsertReviewThread", () => {
       {
         id: 7,
         status: 1,
-        comments: [{ id: 9, content: "old review\n\n" + marker }],
+        comments: [{ id: 9, content: "old review\n\n" + marker, author: { id: trustedAuthorId } }],
       },
     ];
 
@@ -1344,7 +1346,7 @@ describe("AzureDevOpsClient.upsertReviewThread", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
-    await expect(client.upsertReviewThread("new review", sourceCommitId)).resolves.toEqual({
+    await expect(client.upsertReviewThread("new review", sourceCommitId, trustedAuthorId)).resolves.toEqual({
       published: true,
       created: false,
       threadId: 7,
@@ -1366,7 +1368,7 @@ describe("AzureDevOpsClient.upsertReviewThread", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
-    await expect(client.upsertReviewThread("stale review", sourceCommitId)).resolves.toEqual({
+    await expect(client.upsertReviewThread("stale review", sourceCommitId, trustedAuthorId)).resolves.toEqual({
       published: false,
       supersededBy: newer,
     });
@@ -1378,12 +1380,12 @@ describe("AzureDevOpsClient.upsertReviewThread", () => {
       {
         id: 11,
         status: 1,
-        comments: [{ id: 21, content: "review A\n\n" + marker }],
+        comments: [{ id: 21, content: "review A\n\n" + marker, author: { id: trustedAuthorId } }],
       },
       {
         id: 12,
         status: 1,
-        comments: [{ id: 22, content: "review B\n\n" + marker }],
+        comments: [{ id: 22, content: "review B\n\n" + marker, author: { id: trustedAuthorId } }],
       },
     ];
     const statuses = new Map<number, number>();
@@ -1417,7 +1419,7 @@ describe("AzureDevOpsClient.upsertReviewThread", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
-    await expect(client.upsertReviewThread("canonical review", sourceCommitId)).resolves.toEqual({
+    await expect(client.upsertReviewThread("canonical review", sourceCommitId, trustedAuthorId)).resolves.toEqual({
       published: true,
       created: false,
       threadId: 11,

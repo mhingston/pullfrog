@@ -31,6 +31,7 @@ import {
   AzureDevOpsRepositoryClient,
   AzureDevOpsPullRequestCreationOutcomeUnknownError,
   buildAzureDevOpsPullRequestDiff,
+  requireAzureDevOpsTrustedIdentityId,
   resolveAzureDevOpsContext,
   resolveAzureDevOpsRepositoryContext,
   stripRefsHeads,
@@ -498,10 +499,17 @@ function scrubAzureDevOpsAuth(): () => void {
 }
 
 async function runReview(params: { model: string | undefined; dryRun: boolean }): Promise<void> {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID
+  );
   const ctx = resolveAzureDevOpsContext();
   const event = azureDevOpsValidationEvent(ctx);
   const client = new AzureDevOpsClient(ctx);
-  const provider = new AzureDevOpsPullRequestProvider(ctx, client);
+  const provider = new AzureDevOpsPullRequestProvider(
+    ctx,
+    client,
+    trustedAuthorId
+  );
 
   // Both adapters capture Azure authorization before the environment is
   // scrubbed. OpenCode never receives the Azure DevOps credential.
@@ -651,7 +659,8 @@ async function runReview(params: { model: string | undefined; dryRun: boolean })
 
     const inline = await client.upsertInlineReviewThreads(
       inlineFindings,
-      result.pullRequest.source.sha
+      result.pullRequest.source.sha,
+      trustedAuthorId
     );
     if (!inline.published) {
       console.log(
@@ -739,6 +748,9 @@ async function runFollowUp(params: {
   resolve: boolean;
   dryRun: boolean;
 }): Promise<void> {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID
+  );
   const repository = resolveAzureDevOpsRepositoryContext();
   const pullRequestId = requireCliPositiveInteger("--pull-request", params.pullRequest);
   const threadId = requireCliPositiveInteger("--thread", params.thread);
@@ -748,7 +760,11 @@ async function runFollowUp(params: {
 
   const pullRequest = await client.getPullRequest();
   const thread = await client.getThread(threadId);
-  const selection = selectAzureFollowUp({ thread, commentId });
+  const selection = selectAzureFollowUp({
+    thread,
+    commentId,
+    trustedAuthorId,
+  });
 
   if (selection.kind === "ignored") {
     console.log("skipping Azure DevOps follow-up: " + selection.reason);
@@ -758,6 +774,7 @@ async function runFollowUp(params: {
     const reconciled = await client.reconcileThreadFollowUp({
       threadId,
       triggerCommentId: commentId,
+      trustedAuthorId,
       resolve: params.resolve,
     });
     if (!reconciled) {
@@ -884,6 +901,7 @@ async function runFollowUp(params: {
           threadId,
           triggerCommentId: commentId,
           markdown: answer,
+          trustedAuthorId,
           resolve: params.resolve,
         });
         completed = true;
@@ -951,6 +969,9 @@ async function runPollFollowUps(params: {
   max: string | undefined;
   dryRun: boolean;
 }): Promise<void> {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID
+  );
   const repository = resolveAzureDevOpsRepositoryContext();
   const allowedActorIds = parseAzureAllowedActorIds(
     params.allowedActorIds ?? process.env.PULLFROG_AZDO_ALLOWED_ACTOR_IDS
@@ -976,6 +997,7 @@ async function runPollFollowUps(params: {
         threads,
         allowedActorIds,
         after,
+        trustedAuthorId,
         // Gather broadly per PR, then enforce one global cap below.
         max: 50,
       })
@@ -1080,6 +1102,9 @@ async function runWorkItem(params: {
   push: string | undefined;
   dryRun: boolean;
 }): Promise<void> {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID
+  );
   const repository = resolveAzureDevOpsRepositoryContext();
   const workItemId = requireCliPositiveInteger("--work-item", params.workItem);
   const commentId = params.comment?.trim()
@@ -1117,6 +1142,7 @@ async function runWorkItem(params: {
     discussion,
     configuredMode,
     allowedActorIds,
+    trustedAuthorId,
     ...(commentId === undefined ? {} : { commentId }),
   });
 
@@ -1168,24 +1194,6 @@ async function runWorkItem(params: {
       anchorCommitId,
     });
     if (!lock.acquired) {
-      if (selection.trigger.mode === "build") {
-        const existing = await repositoryClient.findActivePullRequestForWorkItemEvent(
-          selection.trigger.eventKey
-        );
-        if (existing) {
-          console.log(
-            "skipping Azure work item: event already has active Azure Repos PR #" +
-              existing.pullRequestId +
-              "; keeping the claimed event lock"
-          );
-          return;
-        }
-        console.log(
-          "skipping Azure work item: event lock is claimed and no matching active PR is visible; " +
-            "keeping the branch and lock to avoid a duplicate create"
-        );
-        return;
-      }
       console.log(
         "skipping Azure work item: another worker owns lock " + lock.refName
       );
@@ -1565,6 +1573,9 @@ async function runPollWorkItems(params: {
   push: string | undefined;
   dryRun: boolean;
 }): Promise<void> {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID
+  );
   const repository = resolveAzureDevOpsRepositoryContext();
   const after = parseAzurePollAfter(
     params.after ?? process.env.PULLFROG_AZDO_POLL_AFTER
@@ -1591,6 +1602,7 @@ async function runPollWorkItems(params: {
       discussion,
       configuredMode,
       allowedActorIds,
+      trustedAuthorId,
       after,
     });
     candidates.push(

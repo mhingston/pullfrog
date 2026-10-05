@@ -12,6 +12,18 @@ export const AZDO_FOLLOWUP_MARKER_PREFIX = "<!-- pullfrog-azure-devops-followup:
 export const AZDO_STATUS_GENRE = "pullfrog";
 export const AZDO_STATUS_NAME = "review";
 
+export function requireAzureDevOpsTrustedIdentityId(
+  value: string | undefined
+): string {
+  const trustedIdentityId = value?.trim().toLowerCase();
+  if (!trustedIdentityId) {
+    throw new Error(
+      "PULLFROG_AZDO_REVIEW_IDENTITY_ID is required to authenticate Pullfrog marker comments"
+    );
+  }
+  return trustedIdentityId;
+}
+
 export function azureDevOpsReviewMarker(sourceCommitId: string): string {
   return AZDO_REVIEW_MARKER_PREFIX + sourceCommitId.toLowerCase() + " -->";
 }
@@ -1465,13 +1477,15 @@ export class AzureDevOpsClient {
 
   #followUpComments(
     thread: AzureDevOpsThread,
-    marker: string
+    marker: string,
+    trustedAuthorId: string
   ): AzureDevOpsComment[] {
     return (thread.comments ?? [])
       .filter(
         (comment) =>
           !comment.isDeleted &&
           typeof comment.content === "string" &&
+          comment.author?.id?.trim().toLowerCase() === trustedAuthorId &&
           comment.content.includes(marker)
       )
       .sort((a, b) => a.id - b.id);
@@ -1505,11 +1519,15 @@ export class AzureDevOpsClient {
   async reconcileThreadFollowUp(params: {
     threadId: number;
     triggerCommentId: number;
+    trustedAuthorId: string;
     resolve?: boolean | undefined;
   }): Promise<{ commentId: number } | undefined> {
     if (!Number.isInteger(params.triggerCommentId) || params.triggerCommentId <= 0) {
       throw new Error("Azure DevOps trigger comment id must be a positive integer");
     }
+    const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+      params.trustedAuthorId
+    );
 
     const thread = await this.getThread(params.threadId);
     const trigger = (thread.comments ?? []).find(
@@ -1528,7 +1546,7 @@ export class AzureDevOpsClient {
       params.threadId,
       params.triggerCommentId
     );
-    const existing = this.#followUpComments(thread, marker);
+    const existing = this.#followUpComments(thread, marker, trustedAuthorId);
     const canonical = existing[0];
     if (!canonical) return undefined;
 
@@ -1544,8 +1562,12 @@ export class AzureDevOpsClient {
     threadId: number;
     triggerCommentId: number;
     markdown: string;
+    trustedAuthorId: string;
     resolve?: boolean | undefined;
   }): Promise<{ created: boolean; commentId: number }> {
+    const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+      params.trustedAuthorId
+    );
     const markdown = params.markdown.trim();
     if (!markdown) {
       throw new Error("Azure DevOps follow-up reply must not be empty");
@@ -1559,6 +1581,7 @@ export class AzureDevOpsClient {
     const reconciled = await this.reconcileThreadFollowUp({
       threadId: params.threadId,
       triggerCommentId: params.triggerCommentId,
+      trustedAuthorId,
       resolve: params.resolve,
     });
     if (reconciled) {
@@ -1584,8 +1607,13 @@ export class AzureDevOpsClient {
     // POST is not conditional. Converge overlapping retries by keeping the
     // lowest marker-bearing comment ID and deleting later duplicates.
     const after = await this.getThread(params.threadId);
-    const matching = this.#followUpComments(after, marker);
-    const canonical = matching[0] ?? posted;
+    const matching = this.#followUpComments(after, marker, trustedAuthorId);
+    const canonical = matching[0];
+    if (!canonical) {
+      throw new Error(
+        "Azure DevOps follow-up reply was not found under the configured trusted identity"
+      );
+    }
     await this.#deleteDuplicateFollowUpComments(params.threadId, matching);
 
     if (params.resolve) await this.#setThreadStatus(params.threadId, 4);
@@ -1706,7 +1734,10 @@ export class AzureDevOpsClient {
     return match?.[1]?.toLowerCase();
   }
 
-  #markedThreads(threads: AzureDevOpsThread[]): Array<{
+  #markedThreads(
+    threads: AzureDevOpsThread[],
+    trustedAuthorId: string
+  ): Array<{
     thread: AzureDevOpsThread;
     comment: AzureDevOpsComment;
     sourceCommitId: string;
@@ -1717,7 +1748,11 @@ export class AzureDevOpsClient {
       sourceCommitId: string;
     }> = [];
     for (const thread of threads) {
-      const comment = thread.comments?.find((candidate) => this.#reviewMarker(candidate));
+      const comment = thread.comments?.find(
+        (candidate) =>
+          candidate.author?.id?.trim().toLowerCase() === trustedAuthorId &&
+          this.#reviewMarker(candidate)
+      );
       if (!comment) continue;
       const sourceCommitId = this.#reviewMarker(comment);
       if (!sourceCommitId) continue;
@@ -1740,7 +1775,10 @@ export class AzureDevOpsClient {
     };
   }
 
-  #markedFindingThreads(threads: AzureDevOpsThread[]): Array<{
+  #markedFindingThreads(
+    threads: AzureDevOpsThread[],
+    trustedAuthorId: string
+  ): Array<{
     thread: AzureDevOpsThread;
     comment: AzureDevOpsComment;
     sourceCommitId: string;
@@ -1755,6 +1793,9 @@ export class AzureDevOpsClient {
 
     for (const thread of threads) {
       for (const comment of thread.comments ?? []) {
+        if (comment.author?.id?.trim().toLowerCase() !== trustedAuthorId) {
+          continue;
+        }
         const marker = this.#findingMarker(comment);
         if (!marker) continue;
         marked.push({ thread, comment, ...marker });
@@ -1792,8 +1833,10 @@ export class AzureDevOpsClient {
 
   async upsertInlineReviewThreads(
     findings: AzureDevOpsInlineFinding[],
-    sourceCommitId: string
+    sourceCommitId: string,
+    trustedAuthorId: string
   ): Promise<AzureDevOpsInlinePublication> {
+    const trusted = requireAzureDevOpsTrustedIdentityId(trustedAuthorId);
     const normalizedSourceCommitId = sourceCommitId.toLowerCase();
     if (!/^[0-9a-f]{40}$/.test(normalizedSourceCommitId)) {
       throw new Error(
@@ -1816,7 +1859,7 @@ export class AzureDevOpsClient {
       }
     }
 
-    const before = this.#markedFindingThreads(await this.listThreads());
+    const before = this.#markedFindingThreads(await this.listThreads(), trusted);
     const desired = new Map<
       string,
       { finding: AzureDevOpsInlineFinding; content: string; changeTrackingId: number }
@@ -1900,7 +1943,7 @@ export class AzureDevOpsClient {
 
     // Re-list to converge concurrent same-location creates and close findings
     // that disappeared on a rerun or belong to an older source iteration.
-    const after = this.#markedFindingThreads(await this.listThreads());
+    const after = this.#markedFindingThreads(await this.listThreads(), trusted);
     const liveAfter =
       (await this.getLiveSourceCommitId()) ?? normalizedSourceCommitId;
 
@@ -1949,8 +1992,10 @@ export class AzureDevOpsClient {
 
   async upsertReviewThread(
     markdown: string,
-    sourceCommitId: string
+    sourceCommitId: string,
+    trustedAuthorId: string
   ): Promise<AzureDevOpsReviewPublication> {
+    const trusted = requireAzureDevOpsTrustedIdentityId(trustedAuthorId);
     const normalizedSourceCommitId = sourceCommitId.toLowerCase();
     if (!/^[0-9a-f]{40}$/.test(normalizedSourceCommitId)) {
       throw new Error("invalid Azure DevOps source commit for review publication: " + sourceCommitId);
@@ -1965,7 +2010,7 @@ export class AzureDevOpsClient {
 
     const marker = azureDevOpsReviewMarker(normalizedSourceCommitId);
     const content = markdown.trim() + "\n\n" + marker;
-    const before = this.#markedThreads(await this.listThreads()).filter(
+    const before = this.#markedThreads(await this.listThreads(), trusted).filter(
       (entry) => entry.sourceCommitId === normalizedSourceCommitId
     );
 
@@ -1998,7 +2043,7 @@ export class AzureDevOpsClient {
     // POST is not conditional, so two overlapping jobs can both create a
     // thread. Re-list after the write, choose the lowest ID as the stable
     // canonical thread for the current source commit, and close duplicates.
-    const after = this.#markedThreads(await this.listThreads());
+    const after = this.#markedThreads(await this.listThreads(), trusted);
     const liveAfter = (await this.getLiveSourceCommitId()) ?? normalizedSourceCommitId;
     const liveThreads = after.filter((entry) => entry.sourceCommitId === liveAfter);
     const canonicalLive = liveThreads[0];

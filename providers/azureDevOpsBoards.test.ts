@@ -128,7 +128,7 @@ describe("AzureDevOpsBoardsProvider allowlisted writes", () => {
   });
 
   it("uses a revision test and emits only tags/state patches", async () => {
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init?: RequestInit | undefined }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       requests.push({ url, init });
@@ -245,11 +245,13 @@ describe("AzureDevOpsBoardsProvider allowlisted writes", () => {
       const url = String(input);
       if (init?.method === "POST") {
         expect(url).toContain("/workitems/42/comments?");
+        expect(url).toContain("format=markdown");
         expect(JSON.parse(String(init.body))).toEqual({ text: "hello" });
         return jsonResponse({ id: 5, text: "hello" });
       }
       expect(init?.method).toBe("PATCH");
       expect(url).toContain("/workitems/42/comments/5?");
+      expect(url).toContain("format=markdown");
       expect(JSON.parse(String(init?.body))).toEqual({ text: "updated" });
       return jsonResponse({ id: 5, text: "updated" });
     });

@@ -20,6 +20,7 @@ import type { AzureDevOpsContext } from "../utils/azureDevOps.ts";
 
 const sourceSha = "0123456789abcdef0123456789abcdef01234567";
 const newerSha = "fedcba9876543210fedcba9876543210fedcba98";
+const trustedAuthorId = "pullfrog-service-id";
 
 function azureFixture(): {
   provider: PullRequestReviewProvider;
@@ -48,13 +49,13 @@ function azureFixture(): {
         targetRefName: "refs/heads/main",
       };
     },
-    async upsertReviewThread(body, expectedSourceSha) {
+    async upsertReviewThread(body, expectedSourceSha, _trustedAuthorId) {
       published.push({ body, sourceSha: expectedSourceSha });
       return { published: true, created: false, threadId: 17 };
     },
   };
   return {
-    provider: new AzureDevOpsPullRequestProvider(ctx, client),
+    provider: new AzureDevOpsPullRequestProvider(ctx, client, trustedAuthorId),
     published,
   };
 }
@@ -364,7 +365,7 @@ describe("provider-specific stale publication", () => {
       },
     };
 
-    const provider = new AzureDevOpsPullRequestProvider(ctx, client);
+    const provider = new AzureDevOpsPullRequestProvider(ctx, client, trustedAuthorId);
     await expect(
       provider.publishReview({ body: "old", sourceSha })
     ).resolves.toEqual({

@@ -4,6 +4,7 @@ import type {
   WorkItemSearchResult,
   WorkItemSnapshot,
 } from "../providers/workItems.ts";
+import { requireAzureDevOpsTrustedIdentityId } from "../utils/azureDevOps.ts";
 
 export const AZDO_WORK_ITEM_MARKER_PREFIX =
   "<!-- pullfrog-azure-devops-work-item:";
@@ -70,9 +71,17 @@ export function azureWorkItemMarker(eventKey: string): string {
   return AZDO_WORK_ITEM_MARKER_PREFIX + eventKey + " -->";
 }
 
-function hasMarker(comments: WorkItemComment[], eventKey: string): WorkItemComment | undefined {
+function hasMarker(
+  comments: WorkItemComment[],
+  eventKey: string,
+  trustedAuthorId: string
+): WorkItemComment | undefined {
   const marker = azureWorkItemMarker(eventKey);
-  return comments.find((comment) => comment.body.includes(marker));
+  return comments.find(
+    (comment) =>
+      comment.author?.id?.trim().toLowerCase() === trustedAuthorId &&
+      comment.body.includes(marker)
+  );
 }
 
 function stripMarkers(value: string): string {
@@ -114,8 +123,17 @@ export function selectAzureWorkItemTrigger(params: {
   discussion: WorkItemDiscussion;
   configuredMode: AzureWorkItemMode;
   allowedActorIds: Set<string>;
+  trustedAuthorId: string;
   commentId?: number | undefined;
 }): AzureWorkItemSelection {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    params.trustedAuthorId
+  );
+  if (params.discussion.truncated) {
+    throw new Error(
+      "Azure work-item discussion is truncated; refusing trigger selection"
+    );
+  }
   if (params.configuredMode === "none" && params.commentId === undefined) {
     return { kind: "ignored", reason: "work-item handling is disabled" };
   }
@@ -130,7 +148,7 @@ export function selectAzureWorkItemTrigger(params: {
     if (!comment) {
       return { kind: "ignored", reason: "trigger comment was not found" };
     }
-    if (comment.body.includes(AZDO_WORK_ITEM_MARKER_PREFIX)) {
+    if (comment.author?.id?.trim().toLowerCase() === trustedAuthorId) {
       return {
         kind: "ignored",
         reason: "Pullfrog does not trigger from its own work-item comments",
@@ -158,7 +176,11 @@ export function selectAzureWorkItemTrigger(params: {
       };
     }
     const eventKey = "comment:" + comment.id;
-    const handled = hasMarker(params.discussion.comments, eventKey);
+    const handled = hasMarker(
+      params.discussion.comments,
+      eventKey,
+      trustedAuthorId
+    );
     if (handled) {
       return { kind: "already-handled", commentId: handled.id };
     }
@@ -176,14 +198,22 @@ export function selectAzureWorkItemTrigger(params: {
   }
 
   const actorId = params.workItem.author?.id?.trim().toLowerCase();
-  if (!actorId || !params.allowedActorIds.has(actorId)) {
+  if (
+    !actorId ||
+    actorId === trustedAuthorId ||
+    !params.allowedActorIds.has(actorId)
+  ) {
     return {
       kind: "ignored",
       reason: "work-item author is not an allowed immutable Azure identity",
     };
   }
   const eventKey = "created:" + params.workItem.id;
-  const handled = hasMarker(params.discussion.comments, eventKey);
+  const handled = hasMarker(
+    params.discussion.comments,
+    eventKey,
+    trustedAuthorId
+  );
   if (handled) {
     return { kind: "already-handled", commentId: handled.id };
   }
@@ -203,7 +233,8 @@ export function selectAzureWorkItemTrigger(params: {
       actorLabel:
         params.workItem.author?.displayName?.trim() ||
         params.workItem.author?.uniqueName?.trim() ||
-        params.workItem.author.id,
+        params.workItem.author?.id ||
+        actorId,
     },
   };
 }
@@ -515,6 +546,11 @@ export function parseAzureWorkItemModelResult(
   if (typeof object.response !== "string" || !object.response.trim()) {
     throw new Error("Azure work-item model result requires a response");
   }
+  if (/<!--\s*pullfrog-azure-devops-/i.test(object.response)) {
+    throw new Error(
+      "Azure work-item model response contains reserved Pullfrog marker syntax"
+    );
+  }
   if (object.response.length > 30_000) {
     throw new Error("Azure work-item model response exceeds 30000 characters");
   }
@@ -571,8 +607,17 @@ export function selectAzureWorkItemPollingCandidates(params: {
   discussion: WorkItemDiscussion;
   configuredMode: AzureWorkItemMode;
   allowedActorIds: Set<string>;
+  trustedAuthorId: string;
   after: Date;
 }): AzureWorkItemPollingCandidate[] {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    params.trustedAuthorId
+  );
+  if (params.discussion.truncated) {
+    throw new Error(
+      "Azure work-item discussion is truncated; refusing polling selection"
+    );
+  }
   const candidates: AzureWorkItemPollingCandidate[] = [];
   const cutoff = params.after.getTime();
   if (!Number.isFinite(cutoff)) {
@@ -583,17 +628,19 @@ export function selectAzureWorkItemPollingCandidates(params: {
     ? Date.parse(params.workItem.createdAt)
     : Number.NaN;
   const authorId = params.workItem.author?.id?.trim().toLowerCase();
-  if (
-    Number.isFinite(created) &&
-    created >= cutoff &&
-    authorId &&
-    params.allowedActorIds.has(authorId)
+    if (
+      Number.isFinite(created) &&
+      created >= cutoff &&
+      authorId &&
+      authorId !== trustedAuthorId &&
+      params.allowedActorIds.has(authorId)
   ) {
     const selection = selectAzureWorkItemTrigger({
       workItem: params.workItem,
       discussion: params.discussion,
       configuredMode: params.configuredMode,
       allowedActorIds: params.allowedActorIds,
+      trustedAuthorId,
     });
     if (selection.kind === "trigger") {
       candidates.push({
@@ -615,6 +662,7 @@ export function selectAzureWorkItemPollingCandidates(params: {
       discussion: params.discussion,
       configuredMode: params.configuredMode,
       allowedActorIds: params.allowedActorIds,
+      trustedAuthorId,
       commentId: comment.id,
     });
     if (selection.kind !== "trigger") continue;

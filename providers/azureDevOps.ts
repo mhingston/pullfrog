@@ -2,6 +2,7 @@ import {
   AzureDevOpsClient,
   type AzureDevOpsContext,
   type AzureDevOpsReviewPublication,
+  requireAzureDevOpsTrustedIdentityId,
   stripRefsHeads,
 } from "../utils/azureDevOps.ts";
 import type {
@@ -27,7 +28,8 @@ export interface AzureDevOpsReviewApi {
   getPullRequest(): Promise<AzureDevOpsPullRequestData>;
   upsertReviewThread(
     markdown: string,
-    sourceCommitId: string
+    sourceCommitId: string,
+    trustedAuthorId: string
   ): Promise<AzureDevOpsReviewPublication>;
 }
 
@@ -80,13 +82,16 @@ export class AzureDevOpsPullRequestDescriptionMutator
 export class AzureDevOpsPullRequestProvider implements PullRequestReviewProvider {
   readonly #ctx: AzureDevOpsContext;
   readonly #client: AzureDevOpsReviewApi;
+  readonly #trustedAuthorId: string | undefined;
 
   constructor(
     ctx: AzureDevOpsContext,
-    client: AzureDevOpsReviewApi = new AzureDevOpsClient(ctx)
+    client: AzureDevOpsReviewApi = new AzureDevOpsClient(ctx),
+    trustedAuthorId = process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID
   ) {
     this.#ctx = ctx;
     this.#client = client;
+    this.#trustedAuthorId = trustedAuthorId;
   }
 
   async getPullRequest(): Promise<PullRequestSnapshot> {
@@ -115,7 +120,8 @@ export class AzureDevOpsPullRequestProvider implements PullRequestReviewProvider
   async publishReview(review: ReviewPublication): Promise<ReviewPublicationResult> {
     const publication = await this.#client.upsertReviewThread(
       review.body,
-      review.sourceSha
+      review.sourceSha,
+      requireAzureDevOpsTrustedIdentityId(this.#trustedAuthorId)
     );
 
     if (!publication.published) {

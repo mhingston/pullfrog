@@ -37,12 +37,14 @@ describe("Azure follow-up poll configuration", () => {
 describe("Azure follow-up poll candidate selection", () => {
   const after = new Date("2026-10-04T18:00:00Z");
   const allowed = new Set(["actor-1"]);
+  const trustedAuthorId = "pullfrog-service-id";
 
   it("selects an allowed explicit mention after the rollout cutoff", () => {
     expect(
       selectAzurePollingCandidates({
         pullRequestId: 42,
         allowedActorIds: allowed,
+        trustedAuthorId,
         after,
         threads: [
           {
@@ -76,6 +78,7 @@ describe("Azure follow-up poll candidate selection", () => {
       selectAzurePollingCandidates({
         pullRequestId: 42,
         allowedActorIds: allowed,
+        trustedAuthorId,
         after,
         threads: [
           {
@@ -123,6 +126,7 @@ describe("Azure follow-up poll candidate selection", () => {
                 id: 5,
                 content:
                   "answer\n\n<!-- pullfrog-azure-devops-followup:13:4 -->",
+                author: { id: trustedAuthorId },
               },
             ],
           },
@@ -136,6 +140,7 @@ describe("Azure follow-up poll candidate selection", () => {
       selectAzurePollingCandidates({
         pullRequestId: 42,
         allowedActorIds: allowed,
+        trustedAuthorId,
         after,
         threads: [
           {
@@ -144,6 +149,7 @@ describe("Azure follow-up poll candidate selection", () => {
               {
                 id: 1,
                 content: "review\n\n" + azureDevOpsReviewMarker(source),
+                author: { id: trustedAuthorId },
                 publishedDate: "2026-10-04T17:00:00Z",
               },
               {
@@ -178,6 +184,7 @@ describe("Azure follow-up poll candidate selection", () => {
       selectAzurePollingCandidates({
         pullRequestId: 42,
         allowedActorIds: allowed,
+        trustedAuthorId,
         after,
         threads,
         max: 2,

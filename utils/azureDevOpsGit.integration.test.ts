@@ -53,6 +53,7 @@ describeIntegration("Azure DevOps authenticated git integration", () => {
       const client = new AzureDevOpsRepositoryClient(repository);
       const root = mkdtempSync(join(tmpdir(), "pullfrog-azdo-integration-"));
       let cleanupSha: string | undefined;
+      let branchCreated = false;
 
       try {
         git(root, ["init"]);
@@ -64,6 +65,7 @@ describeIntegration("Azure DevOps authenticated git integration", () => {
           permission: "enabled",
         });
         cleanupSha = created.sha;
+        branchCreated = true;
 
         const ctx = {
           ...repository,
@@ -99,11 +101,10 @@ describeIntegration("Azure DevOps authenticated git integration", () => {
         );
       } finally {
         try {
-          const live = await client.getBranchObjectId(branch);
-          if (live) {
+          if (branchCreated && cleanupSha) {
             await client.deletePullfrogBranch({
               branch,
-              expectedCommitId: live,
+              expectedCommitId: cleanupSha,
               permission: "enabled",
             });
           }

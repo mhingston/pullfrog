@@ -387,7 +387,7 @@ export class AzureDevOpsBoardsProvider implements WorkItemProvider {
     const comment = await this.#json<AzureWorkItemComment>(
       "/_apis/wit/workitems/" +
         id +
-        "/comments?api-version=" +
+        "/comments?format=markdown&api-version=" +
         COMMENTS_API_VERSION,
       {
         method: "POST",
@@ -416,7 +416,7 @@ export class AzureDevOpsBoardsProvider implements WorkItemProvider {
         id +
         "/comments/" +
         commentId +
-        "?api-version=" +
+        "?format=markdown&api-version=" +
         COMMENTS_API_VERSION,
       {
         method: "PATCH",

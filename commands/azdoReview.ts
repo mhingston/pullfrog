@@ -161,33 +161,50 @@ function rightSideLines(diff: string): Map<string, Set<number>> {
   const linesByFile = new Map<string, Set<number>>();
   let path: string | undefined;
   let newLine = 0;
+  let oldLinesRemaining = 0;
+  let newLinesRemaining = 0;
+  let inHunk = false;
 
   for (const line of diff.split("\n")) {
-    if (line.startsWith("+++ ")) {
+    if (!inHunk && line.startsWith("+++ ")) {
       const raw = line.slice(4).trim();
       path = raw === "/dev/null" ? undefined : raw.replace(/^b\//, "").replace(/^\/+/, "");
       if (path && !linesByFile.has(path)) linesByFile.set(path, new Set());
       continue;
     }
 
-    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const hunk = !inHunk
+      ? line.match(/^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/)
+      : undefined;
     if (hunk) {
-      newLine = Number(hunk[1]);
+      oldLinesRemaining = Number(hunk[1] ?? 1);
+      newLine = Number(hunk[2]);
+      newLinesRemaining = Number(hunk[3] ?? 1);
+      inHunk = oldLinesRemaining > 0 || newLinesRemaining > 0;
       continue;
     }
-    if (!path || newLine <= 0) continue;
+    if (!inHunk || line.startsWith("\\")) continue;
 
-    if (line.startsWith("+") && !line.startsWith("+++")) {
-      linesByFile.get(path)?.add(newLine);
+    const prefix = line[0];
+    if (prefix === " " && oldLinesRemaining > 0 && newLinesRemaining > 0) {
+      if (path && newLine > 0) linesByFile.get(path)?.add(newLine);
+      oldLinesRemaining -= 1;
+      newLinesRemaining -= 1;
       newLine += 1;
-    } else if (line.startsWith("-") && !line.startsWith("---")) {
-      // Removed lines exist only on the left side.
-    } else if (line.startsWith(" ")) {
-      linesByFile.get(path)?.add(newLine);
+    } else if (prefix === "+" && newLinesRemaining > 0) {
+      if (path && newLine > 0) linesByFile.get(path)?.add(newLine);
+      newLinesRemaining -= 1;
       newLine += 1;
-    } else if (!line.startsWith("\\")) {
-      // Be conservative around unexpected patch syntax.
-      newLine += 1;
+    } else if (prefix === "-" && oldLinesRemaining > 0) {
+      oldLinesRemaining -= 1;
+    } else {
+      // Malformed hunk content must not shift a right-side location.
+      inHunk = false;
+      continue;
+    }
+
+    if (oldLinesRemaining === 0 && newLinesRemaining === 0) {
+      inHunk = false;
     }
   }
 

@@ -265,14 +265,9 @@ export function analyzeAzurePipelineLog(
   excerpt: string;
 } {
   const sanitized = redactAzurePipelineLog(raw, options?.secrets ?? []);
-  const maxChars = options?.maxChars ?? MAX_LOG_CHARS;
+  const maxChars = Math.max(1, options?.maxChars ?? MAX_LOG_CHARS);
   const truncated = sanitized.length > maxChars;
-  const bounded = truncated
-    ? sanitized.slice(0, maxChars) +
-      "\n[Pullfrog truncated this Azure Pipeline log for bounded model context.]"
-    : sanitized;
-
-  const lines = bounded.split(/\r?\n/);
+  const lines = sanitized.split(/\r?\n/);
   const index: AzureCiInterestingLine[] = [];
   let lastInteresting = -1;
 
@@ -281,21 +276,62 @@ export function analyzeAzurePipelineLog(
     const type = classifyInterestingLine(content);
     if (!type) continue;
     lastInteresting = i;
-    if (index.length < MAX_INDEX_LINES) {
-      index.push({ line: i + 1, type, content: content.slice(0, 1000) });
+    index.push({ line: i + 1, type, content: content.slice(0, 1000) });
+    if (index.length > MAX_INDEX_LINES) index.shift();
+  }
+
+  const center =
+    lastInteresting >= 0 ? lastInteresting : Math.max(0, lines.length - 1);
+  const truncationNote =
+    truncated
+      ? "[Pullfrog truncated this Azure Pipeline log for bounded model context.]"
+      : "";
+  const note = truncationNote.slice(0, maxChars);
+  const excerptBudget = Math.max(0, maxChars - note.length - (note ? 1 : 0));
+  const selected = new Map<number, string>();
+  const renderLine = (lineIndex: number, maxLength: number): string => {
+    const prefix = String(lineIndex + 1).padStart(5, " ") + " | ";
+    if (maxLength <= prefix.length) return prefix.slice(0, maxLength);
+    return (
+      prefix +
+      (lines[lineIndex] ?? "").slice(
+        0,
+        Math.min(1000, maxLength - prefix.length)
+      )
+    );
+  };
+  const centerLine = renderLine(center, excerptBudget);
+  if (centerLine) selected.set(center, centerLine);
+
+  for (let distance = 1; distance <= EXCERPT_RADIUS; distance += 1) {
+    for (const lineIndex of [center - distance, center + distance]) {
+      if (lineIndex < 0 || lineIndex >= lines.length) continue;
+      const candidate = renderLine(lineIndex, 1010);
+      const currentLength = [...selected.values()].reduce(
+        (total, line) => total + line.length,
+        0
+      );
+      const separatorLength = selected.size > 0 ? 1 : 0;
+      if (currentLength + separatorLength + candidate.length <= excerptBudget) {
+        selected.set(lineIndex, candidate);
+      }
     }
   }
 
-  const center = lastInteresting >= 0 ? lastInteresting : Math.max(0, lines.length - 1);
-  const start = Math.max(0, center - EXCERPT_RADIUS);
-  const end = Math.min(lines.length, center + EXCERPT_RADIUS + 1);
-  const excerpt = lines
-    .slice(start, end)
-    .map((line, offset) => String(start + offset + 1).padStart(5, " ") + " | " + line)
-    .join("\n");
+  const excerptLines = [...selected.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, line]) => line);
+  const excerptBody = excerptLines.join("\n");
+  const unboundedExcerpt =
+    excerptBody +
+    (note ? (excerptBody ? "\n" : "") + note : "");
+  const excerpt =
+    unboundedExcerpt.length > maxChars
+      ? unboundedExcerpt.slice(-maxChars)
+      : unboundedExcerpt;
 
   return {
-    totalLines: sanitized.split(/\r?\n/).length,
+    totalLines: lines.length,
     truncated,
     index,
     excerpt,

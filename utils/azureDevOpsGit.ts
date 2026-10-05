@@ -604,6 +604,25 @@ function changedFiles(cwd: string): string[] {
   return [...new Set([...tracked, ...untracked])].sort();
 }
 
+function assertNoConfiguredGitFiltersBeforeDiff(params: {
+  cwd: string;
+  commands: readonly GitFilterCommand[];
+  operation: string;
+}): void {
+  // Discover paths without diff/status: those commands may run a configured
+  // clean filter while comparing worktree content, before we can reject it.
+  const tracked = splitNullList(git(params.cwd, ["ls-files", "-z"]));
+  const untracked = splitNullList(
+    git(params.cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--"])
+  );
+  assertNoConfiguredGitFiltersForFiles({
+    cwd: params.cwd,
+    files: [...new Set([...tracked, ...untracked])],
+    commands: params.commands,
+    operation: params.operation,
+  });
+}
+
 function assertNoChangedLfsFiles(cwd: string, files: string[]): void {
   for (let i = 0; i < files.length; i += 100) {
     const batch = files.slice(i, i + 100);
@@ -956,6 +975,11 @@ export async function commitAndPushAzureDevOpsMergeResolution(params: {
     throw new Error("Azure DevOps merge commit message must be 5000 characters or fewer");
   }
 
+  assertNoConfiguredGitFiltersBeforeDiff({
+    cwd: params.cwd,
+    commands: ["clean", "process"],
+    operation: "merge commit staging",
+  });
   const files = changedFiles(params.cwd);
   if (files.length === 0) {
     throw new Error("Azure DevOps merge commit blocked: merge has no working-tree changes");
@@ -1118,6 +1142,11 @@ export async function commitAndPushAzureDevOpsSource(params: {
     );
   }
 
+  assertNoConfiguredGitFiltersBeforeDiff({
+    cwd: params.cwd,
+    commands: ["clean", "process"],
+    operation: "commit staging",
+  });
   const files = changedFiles(params.cwd);
   if (files.length === 0) {
     throw new Error("Azure DevOps commit blocked: working tree has no changes");

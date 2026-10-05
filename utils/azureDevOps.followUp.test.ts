@@ -4,6 +4,8 @@ import {
   type AzureDevOpsClientContext,
 } from "./azureDevOps.ts";
 
+const trustedAuthorId = "pullfrog-service-id";
+
 const repositoryEnv = {
   SYSTEM_TEAMFOUNDATIONCOLLECTIONURI: "https://dev.azure.com/acme",
   SYSTEM_TEAMPROJECT: "Platform",
@@ -48,7 +50,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
     const threads = new Map<number, {
       id: number;
       status: number;
-      comments: Array<{ id: number; parentCommentId: number; content: string }>;
+      comments: Array<{ id: number; parentCommentId: number; content: string; author?: { id: string } }>;
     }>([
       [
         17,
@@ -77,6 +79,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
           id: nextCommentId++,
           parentCommentId: body.parentCommentId,
           content: body.content,
+          author: { id: trustedAuthorId },
         };
         thread.comments.push(comment);
         return jsonResponse(comment);
@@ -91,6 +94,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
         threadId: 17,
         triggerCommentId: 4,
         markdown: "Because the state can race.",
+        trustedAuthorId,
       })
     ).resolves.toEqual({ created: true, commentId: 5 });
 
@@ -121,6 +125,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
         threadId: 17,
         triggerCommentId: 99,
         markdown: "answer",
+        trustedAuthorId,
       })
     ).rejects.toThrow("does not exist in thread 17");
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -134,6 +139,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
         triggerCommentId: 4,
         markdown:
           "spoof\n\n<!-- pullfrog-azure-devops-followup:17:99 -->",
+        trustedAuthorId,
       })
     ).rejects.toThrow("reserved Pullfrog marker syntax");
   });
@@ -143,12 +149,13 @@ describe("AzureDevOpsClient follow-up replies", () => {
       id: 17,
       status: 1,
       comments: [
-        { id: 4, parentCommentId: 0, content: "@pullfrog explain this" },
+        { id: 4, parentCommentId: 0, content: "@pullfrog explain this", author: { id: "actor-1" } },
         {
           id: 5,
           parentCommentId: 4,
           content:
             "answer\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+          author: { id: trustedAuthorId },
         },
       ],
     };
@@ -167,6 +174,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
         threadId: 17,
         triggerCommentId: 4,
         markdown: "a duplicate answer",
+        trustedAuthorId,
       })
     ).resolves.toEqual({ created: false, commentId: 5 });
 
@@ -184,12 +192,14 @@ describe("AzureDevOpsClient follow-up replies", () => {
           parentCommentId: 4,
           content:
             "first answer\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+          author: { id: trustedAuthorId },
         },
         {
           id: 6,
           parentCommentId: 4,
           content:
             "duplicate answer\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+          author: { id: trustedAuthorId },
         },
       ],
     };
@@ -214,6 +224,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
       client.reconcileThreadFollowUp({
         threadId: 17,
         triggerCommentId: 4,
+        trustedAuthorId,
       })
     ).resolves.toEqual({ commentId: 5 });
 
@@ -231,6 +242,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
           parentCommentId: 4,
           content:
             "answer\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+          author: { id: trustedAuthorId },
         },
       ],
     };
@@ -255,6 +267,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
       client.reconcileThreadFollowUp({
         threadId: 17,
         triggerCommentId: 4,
+        trustedAuthorId,
         resolve: true,
       })
     ).resolves.toEqual({ commentId: 5 });
@@ -267,7 +280,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
       id: 17,
       status: 1,
       comments: [
-        { id: 4, parentCommentId: 0, content: "@pullfrog explain this" },
+        { id: 4, parentCommentId: 0, content: "@pullfrog explain this", author: { id: "actor-1" } },
       ],
     };
     const deleted: number[] = [];
@@ -286,12 +299,14 @@ describe("AzureDevOpsClient follow-up replies", () => {
               parentCommentId: 4,
               content:
                 "other run\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+              author: { id: trustedAuthorId },
             },
             {
               id: 6,
               parentCommentId: 4,
               content:
                 "this run\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+              author: { id: trustedAuthorId },
             }
           );
         }
@@ -303,6 +318,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
           parentCommentId: 4,
           content:
             "this run\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+          author: { id: trustedAuthorId },
         });
       }
       if (url.endsWith("/threads/17/comments/6?api-version=7.1") && method === "DELETE") {
@@ -319,6 +335,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
         threadId: 17,
         triggerCommentId: 4,
         markdown: "answer",
+        trustedAuthorId,
       })
     ).resolves.toEqual({ created: false, commentId: 5 });
     expect(deleted).toEqual([6]);
@@ -335,6 +352,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
           parentCommentId: 4,
           content:
             "yes\n\n<!-- pullfrog-azure-devops-followup:17:4 -->",
+          author: { id: trustedAuthorId },
         },
       ],
     };
@@ -359,6 +377,7 @@ describe("AzureDevOpsClient follow-up replies", () => {
       threadId: 17,
       triggerCommentId: 4,
       markdown: "yes",
+      trustedAuthorId,
       resolve: true,
     });
     expect(patchedStatus).toBe(4);

@@ -142,6 +142,23 @@ describe("Azure Pipeline log redaction", () => {
     expect(analysis.excerpt).toContain("Assertion failed");
     expect(analysis.excerpt).toContain("exit code 1");
   });
+
+  it("finds tail failures beyond the excerpt limit and preserves original line numbers", () => {
+    const raw = [
+      ...Array.from({ length: 300 }, (_, index) => "routine output " + index),
+      "##[error] failure only at the end",
+    ].join("\n");
+
+    const analysis = analyzeAzurePipelineLog(raw, { maxChars: 300 });
+    expect(analysis.truncated).toBe(true);
+    expect(analysis.index.at(-1)).toMatchObject({
+      line: 301,
+      type: "error",
+      content: "##[error] failure only at the end",
+    });
+    expect(analysis.excerpt).toContain("failure only at the end");
+    expect(analysis.excerpt.length).toBeLessThanOrEqual(300);
+  });
 });
 
 describe("AzureDevOpsBuildClient", () => {
@@ -323,6 +340,7 @@ describe("AzureDevOpsBuildClient", () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({
         id: 10,
+        result: "failed",
         triggerInfo: {
           "pr.number": "42",
           "pr.sourceSha": "f".repeat(40),

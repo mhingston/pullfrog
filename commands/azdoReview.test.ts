@@ -113,6 +113,33 @@ describe("azureInlineFindings", () => {
     ]);
   });
 
+  it("counts changed source lines beginning with diff-marker characters", () => {
+    const trickyDiff = [
+      "diff --git a/src/counter.ts b/src/counter.ts",
+      "--- a/src/counter.ts",
+      "+++ b/src/counter.ts",
+      "@@ -1 +1 @@",
+      "---counter",
+      "+++counter",
+    ].join("\n");
+    const review = parseAzureStructuredReview(
+      JSON.stringify({
+        summary: "counter change",
+        findings: [
+          {
+            severity: "high",
+            title: "increment",
+            body: "check this expression",
+            path: "src/counter.ts",
+            line: 1,
+          },
+        ],
+      })
+    );
+
+    expect(azureInlineFindings(review, trickyDiff)).toHaveLength(1);
+  });
+
   it("deduplicates multiple findings on the same location", () => {
     const review = parseAzureStructuredReview(
       JSON.stringify({

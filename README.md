@@ -191,6 +191,8 @@ Pullfrog supports the core review/task lifecycle across **Azure Repos**, **Azure
 
 For PR validation, an Azure Pipelines build-validation job supplies PR context through Azure's predefined variables. Pullfrog can review the source-commit diff, publish a convergent summary and reliable inline findings, set an iteration-scoped merge-gating status, handle follow-up requests, safely write fixes, create Pullfrog-owned PRs, and repair eligible CI failures or merge conflicts. Azure Boards work items can also drive triage, planning, related-item lookup, allowlisted field/tag updates, and repository-level implementation tasks through explicit commands or scheduled polling.
 
+Every Azure review, follow-up, and work-item command requires `PULLFROG_AZDO_REVIEW_IDENTITY_ID`: the immutable `author.id` of the Azure identity that publishes Pullfrog comments (normally the pipeline build-service identity). Set it in each relevant step's environment; marker text from other authors is not treated as Pullfrog output.
+
 > Azure Repos does **not** use a YAML `pr:` trigger. Add the pipeline as a [**Build validation** policy](https://learn.microsoft.com/en-us/azure/devops/repos/git/branch-policies?view=azure-devops#set-build-validation) on the target branch instead. The `System.PullRequest.*` variables used by `pullfrog azdo review` are populated for those policy-triggered PR builds.
 
 A minimal Azure OpenAI setup:
@@ -212,6 +214,7 @@ steps:
       # Explicitly expose the job token to scripts. The build-service identity
       # needs "Contribute to pull requests" on this repository.
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      PULLFROG_AZDO_REVIEW_IDENTITY_ID: $(PULLFROG_AZDO_REVIEW_IDENTITY_ID)
 
       # Azure OpenAI model configuration
       AZURE_API_KEY: $(AZURE_API_KEY)
@@ -269,6 +272,7 @@ steps:
     displayName: Pullfrog PR follow-up
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      PULLFROG_AZDO_REVIEW_IDENTITY_ID: $(PULLFROG_AZDO_REVIEW_IDENTITY_ID)
       AZURE_API_KEY: $(AZURE_API_KEY)
       AZURE_RESOURCE_NAME: $(AZURE_RESOURCE_NAME)
       AZURE_DEPLOYMENT: $(AZURE_DEPLOYMENT)
@@ -319,6 +323,7 @@ steps:
     displayName: Poll Azure PR follow-ups
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      PULLFROG_AZDO_REVIEW_IDENTITY_ID: $(PULLFROG_AZDO_REVIEW_IDENTITY_ID)
 
       # Required safety gates for automatic transport.
       # Comma-separated immutable Azure IdentityRef IDs from comment.author.id.
@@ -624,4 +629,3 @@ Azure Pipelines build validation is treated as the automatic `validation` PR eve
 The Azure token boundary is unchanged. The provider captures REST authorization before Pullfrog scrubs Azure DevOps credentials from the process environment; the isolated OpenCode subprocess still cannot access `System.AccessToken`, `AZURE_DEVOPS_TOKEN`, or `AZURE_DEVOPS_PAT`.
 
 Publication consistency is explicit rather than pretending the providers have identical atomicity. Azure's adapter is **source-convergent**: it revalidates around publication and closes/converges stale Pullfrog threads. GitHub's proof adapter is **best-effort** because GitHub review creation has no conditional “only if this is still the PR head” write; it rechecks after posting and reports if the head advanced during publication.
-

@@ -2,6 +2,7 @@ import {
   AZDO_FINDING_MARKER_PREFIX,
   AZDO_FOLLOWUP_MARKER_PREFIX,
   AZDO_REVIEW_MARKER_PREFIX,
+  requireAzureDevOpsTrustedIdentityId,
   type AzureDevOpsComment,
   type AzureDevOpsThread,
 } from "../utils/azureDevOps.ts";
@@ -26,12 +27,16 @@ function visibleComments(thread: AzureDevOpsThread): AzureDevOpsComment[] {
     .sort((a, b) => a.id - b.id);
 }
 
-function isPullfrogComment(comment: AzureDevOpsComment): boolean {
+function isPullfrogComment(
+  comment: AzureDevOpsComment,
+  trustedAuthorId: string
+): boolean {
   const content = comment.content ?? "";
   return (
-    content.includes(AZDO_REVIEW_MARKER_PREFIX) ||
-    content.includes(AZDO_FINDING_MARKER_PREFIX) ||
-    content.includes(AZDO_FOLLOWUP_MARKER_PREFIX)
+    comment.author?.id?.trim().toLowerCase() === trustedAuthorId &&
+    (content.includes(AZDO_REVIEW_MARKER_PREFIX) ||
+      content.includes(AZDO_FINDING_MARKER_PREFIX) ||
+      content.includes(AZDO_FOLLOWUP_MARKER_PREFIX))
   );
 }
 
@@ -65,7 +70,11 @@ function renderConversation(thread: AzureDevOpsThread): string {
 export function selectAzureFollowUp(params: {
   thread: AzureDevOpsThread;
   commentId: number;
+  trustedAuthorId: string;
 }): AzureFollowUpSelection {
+  const trustedAuthorId = requireAzureDevOpsTrustedIdentityId(
+    params.trustedAuthorId
+  );
   if (!Number.isInteger(params.commentId) || params.commentId <= 0) {
     return { kind: "ignored", reason: "comment id must be a positive integer" };
   }
@@ -85,6 +94,7 @@ export function selectAzureFollowUp(params: {
       (comment) =>
         comment.id !== target.id &&
         typeof comment.content === "string" &&
+        comment.author?.id?.trim().toLowerCase() === trustedAuthorId &&
         comment.content.includes(marker)
     )
     .sort((a, b) => a.id - b.id)[0];
@@ -92,7 +102,7 @@ export function selectAzureFollowUp(params: {
     return { kind: "already-handled", commentId: handled.id };
   }
 
-  if (isPullfrogComment(target)) {
+  if (target.author?.id?.trim().toLowerCase() === trustedAuthorId) {
     return { kind: "ignored", reason: "Pullfrog does not trigger from its own comments" };
   }
 
@@ -111,7 +121,8 @@ export function selectAzureFollowUp(params: {
   }
 
   const pullfrogOwnedThread = comments.some(
-    (comment) => comment.id !== target.id && isPullfrogComment(comment)
+    (comment) =>
+      comment.id !== target.id && isPullfrogComment(comment, trustedAuthorId)
   );
   const explicitlyMentioned = /(^|[^A-Za-z0-9_])@pullfrog\b/i.test(request);
   const isReply = (target.parentCommentId ?? 0) > 0;

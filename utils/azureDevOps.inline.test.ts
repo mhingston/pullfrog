@@ -6,6 +6,7 @@ import {
 
 const sourceCommitId = "0123456789abcdef0123456789abcdef01234567";
 const newerCommitId = "fedcba9876543210fedcba9876543210fedcba98";
+const trustedAuthorId = "pullfrog-service-id";
 const baseEnv = {
   SYSTEM_TEAMFOUNDATIONCOLLECTIONURI: "https://dev.azure.com/acme",
   SYSTEM_TEAMPROJECT: "Platform",
@@ -110,7 +111,7 @@ describe("AzureDevOpsClient inline findings", () => {
     const threads: Array<{
       id: number;
       status: number;
-      comments: Array<{ id: number; content: string }>;
+      comments: Array<{ id: number; content: string; author?: { id: string } }>;
     }> = [];
     let postedBody: Record<string, any> | undefined;
 
@@ -147,7 +148,7 @@ describe("AzureDevOpsClient inline findings", () => {
         threads.push({
           id: 99,
           status: 1,
-          comments: [{ id: 100, content }],
+          comments: [{ id: 100, content, author: { id: trustedAuthorId } }],
         });
         return jsonResponse({ id: 99 });
       }
@@ -162,7 +163,8 @@ describe("AzureDevOpsClient inline findings", () => {
     await expect(
       client.upsertInlineReviewThreads(
         [{ path: "src/a.ts", line: 12, body: "**HIGH — race**\n\ndetails" }],
-        sourceCommitId
+        sourceCommitId,
+        trustedAuthorId
       )
     ).resolves.toEqual({
       published: true,
@@ -198,12 +200,12 @@ describe("AzureDevOpsClient inline findings", () => {
       {
         id: 10,
         status: 1,
-        comments: [{ id: 20, content: "old A\n\n" + currentMarker }],
+        comments: [{ id: 20, content: "old A\n\n" + currentMarker, author: { id: trustedAuthorId } }],
       },
       {
         id: 11,
         status: 1,
-        comments: [{ id: 21, content: "old B\n\n" + obsoleteMarker }],
+        comments: [{ id: 21, content: "old B\n\n" + obsoleteMarker, author: { id: trustedAuthorId } }],
       },
     ];
     const statuses = new Map<number, number>();
@@ -257,7 +259,8 @@ describe("AzureDevOpsClient inline findings", () => {
     const client = new AzureDevOpsClient(resolveAzureDevOpsContext(baseEnv));
     const result = await client.upsertInlineReviewThreads(
       [{ path: "src/a.ts", line: 12, body: "new A" }],
-      sourceCommitId
+      sourceCommitId,
+      trustedAuthorId
     );
 
     expect(result).toMatchObject({
@@ -276,12 +279,12 @@ describe("AzureDevOpsClient inline findings", () => {
       {
         id: 10,
         status: 1,
-        comments: [{ id: 20, content: "stale finding\n\n" + staleMarker }],
+        comments: [{ id: 20, content: "stale finding\n\n" + staleMarker, author: { id: trustedAuthorId } }],
       },
       {
         id: 11,
         status: 1,
-        comments: [{ id: 21, content: "newer finding\n\n" + newerMarker }],
+        comments: [{ id: 21, content: "newer finding\n\n" + newerMarker, author: { id: trustedAuthorId } }],
       },
     ];
     const statuses = new Map<number, number>();
@@ -338,7 +341,8 @@ describe("AzureDevOpsClient inline findings", () => {
     await expect(
       client.upsertInlineReviewThreads(
         [{ path: "src/a.ts", line: 12, body: "updated stale finding" }],
-        sourceCommitId
+        sourceCommitId,
+        trustedAuthorId
       )
     ).resolves.toEqual({
       published: false,
@@ -379,7 +383,8 @@ describe("AzureDevOpsClient inline findings", () => {
     await expect(
       client.upsertInlineReviewThreads(
         [{ path: "src/missing.ts", line: 4, body: "finding" }],
-        sourceCommitId
+        sourceCommitId,
+        trustedAuthorId
       )
     ).resolves.toMatchObject({
       published: true,
