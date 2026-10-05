@@ -1,4 +1,7 @@
 import type {
+  PullRequestDescriptionMutator,
+  PullRequestDescriptionMutationResult,
+  PullRequestDescriptionUpdate,
   PullRequestReviewProvider,
   PullRequestSnapshot,
   ReviewPublication,
@@ -39,6 +42,65 @@ export interface GitHubReviewApi {
       commit_id: string;
     }): Promise<{ data: GitHubReviewData }>;
   };
+}
+
+export interface GitHubMutationApi {
+  pulls: {
+    update(params: {
+      owner: string;
+      repo: string;
+      pull_number: number;
+      body: string;
+    }): Promise<{ data: GitHubPullRequestData }>;
+  };
+}
+
+export class GitHubPullRequestDescriptionMutator
+  implements PullRequestDescriptionMutator
+{
+  readonly #api: GitHubMutationApi;
+  readonly #owner: string;
+  readonly #repo: string;
+  readonly #pullNumber: number;
+
+  constructor(params: {
+    api: GitHubMutationApi;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+  }) {
+    this.#api = params.api;
+    this.#owner = params.owner;
+    this.#repo = params.repo;
+    this.#pullNumber = params.pullNumber;
+  }
+
+  async updatePullRequestDescription(
+    update: PullRequestDescriptionUpdate
+  ): Promise<PullRequestDescriptionMutationResult> {
+    const response = await this.#api.pulls.update({
+      owner: this.#owner,
+      repo: this.#repo,
+      pull_number: this.#pullNumber,
+      body: update.description,
+    });
+    const pullRequest = response.data;
+    if (pullRequest.number !== this.#pullNumber) {
+      throw new Error(
+        "GitHub PR mutation returned unexpected pull request #" +
+          pullRequest.number
+      );
+    }
+
+    return {
+      provider: "github",
+      repository: { id: this.#owner + "/" + this.#repo },
+      id: String(pullRequest.id),
+      number: pullRequest.number,
+      title: pullRequest.title,
+      description: pullRequest.body ?? "",
+    };
+  }
 }
 
 export class GitHubPullRequestProvider implements PullRequestReviewProvider {
