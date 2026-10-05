@@ -34,7 +34,7 @@ export interface AzureDevOpsReviewApi {
 export interface AzureDevOpsMutationApi {
   updatePullRequestDescription(
     description: string,
-    expectedSourceCommitId?: string
+    expectedSourceCommitId: string
   ): Promise<AzureDevOpsPullRequestData>;
 }
 
