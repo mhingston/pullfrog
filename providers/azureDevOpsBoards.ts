@@ -483,7 +483,7 @@ export class AzureDevOpsBoardsProvider implements WorkItemProvider {
         });
         continue;
       }
-      mutation satisfies never;
+      throw new Error("Azure Boards update received an unsupported mutation kind");
     }
 
     const updated = await this.#json<AzureWorkItem>(
