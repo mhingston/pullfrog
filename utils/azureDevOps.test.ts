@@ -496,6 +496,157 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("abandons a created PR when returned refs fail validation", async () => {
+    const sourceBranch = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(sourceBranch);
+    let abandoned = false;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (
+        url.includes(
+          "/refs?filter=" + encodeURIComponent("heads/" + ownershipBranch)
+        )
+      ) {
+        return jsonResponse({
+          value: [{
+            name: "refs/heads/" + ownershipBranch,
+            objectId: targetCommitId,
+          }],
+        });
+      }
+      if (url.includes("/refs?filter=heads%2Fpullfrog%2Fbranches%2Ffix-42")) {
+        return jsonResponse({
+          value: [{ name: "refs/heads/" + sourceBranch, objectId: sourceCommitId }],
+        });
+      }
+      if (url.includes("/refs?filter=heads%2Fmain")) {
+        return jsonResponse({
+          value: [{ name: "refs/heads/main", objectId: targetCommitId }],
+        });
+      }
+      if (url.endsWith("/pullrequests?api-version=7.1") && method === "POST") {
+        return jsonResponse({
+          pullRequestId: 77,
+          title: "Fix",
+          description: "",
+          repository: { id: "repo-guid" },
+          sourceRefName: "refs/heads/" + sourceBranch,
+          targetRefName: "refs/heads/release",
+        });
+      }
+      if (
+        url.endsWith("/pullrequests/77?api-version=7.1") &&
+        method === "PATCH"
+      ) {
+        abandoned = true;
+        return jsonResponse({
+          pullRequestId: 77,
+          title: "Fix",
+          description: "",
+          sourceRefName: "refs/heads/" + sourceBranch,
+          targetRefName: "refs/heads/release",
+        });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch,
+        sourceCommitId,
+        targetBranch: "main",
+        title: "Fix",
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("unexpected source/target refs");
+    expect(abandoned).toBe(true);
+  });
+
+  it("abandons a created PR when final source verification errors", async () => {
+    const sourceBranch = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(sourceBranch);
+    let sourceReads = 0;
+    let abandoned = false;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (
+        url.includes(
+          "/refs?filter=" + encodeURIComponent("heads/" + ownershipBranch)
+        )
+      ) {
+        return jsonResponse({
+          value: [{
+            name: "refs/heads/" + ownershipBranch,
+            objectId: targetCommitId,
+          }],
+        });
+      }
+      if (url.includes("/refs?filter=heads%2Fpullfrog%2Fbranches%2Ffix-42")) {
+        sourceReads += 1;
+        if (sourceReads > 1) throw new Error("simulated ref read failure");
+        return jsonResponse({
+          value: [{ name: "refs/heads/" + sourceBranch, objectId: sourceCommitId }],
+        });
+      }
+      if (url.includes("/refs?filter=heads%2Fmain")) {
+        return jsonResponse({
+          value: [{ name: "refs/heads/main", objectId: targetCommitId }],
+        });
+      }
+      if (url.endsWith("/pullrequests?api-version=7.1") && method === "POST") {
+        return jsonResponse({
+          pullRequestId: 77,
+          title: "Fix",
+          description: "",
+          repository: { id: "repo-guid" },
+          sourceRefName: "refs/heads/" + sourceBranch,
+          targetRefName: "refs/heads/main",
+        });
+      }
+      if (
+        url.endsWith("/pullrequests/77?api-version=7.1") &&
+        method === "PATCH"
+      ) {
+        abandoned = true;
+        return jsonResponse({
+          pullRequestId: 77,
+          title: "Fix",
+          description: "",
+          sourceRefName: "refs/heads/" + sourceBranch,
+          targetRefName: "refs/heads/main",
+        });
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch,
+        sourceCommitId,
+        targetBranch: "main",
+        title: "Fix",
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("simulated ref read failure");
+    expect(abandoned).toBe(true);
+  });
+
   it("abandons a just-created PR if the source moves during creation", async () => {
     const sourceBranch = "pullfrog/branches/fix-42";
     const ownershipBranch = azureDevOpsBranchOwnershipBranch(sourceBranch);
