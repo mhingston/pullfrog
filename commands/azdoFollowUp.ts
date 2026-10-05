@@ -58,13 +58,31 @@ function authorLabel(comment: AzureDevOpsComment): string {
   );
 }
 
+const MAX_CONVERSATION_COMMENTS = 50;
+const MAX_CONVERSATION_CHARS = 30_000;
+const MAX_CONVERSATION_COMMENT_CHARS = 8_000;
+
 function renderConversation(thread: AzureDevOpsThread): string {
-  return visibleComments(thread)
+  const rendered = visibleComments(thread)
+    .slice(-MAX_CONVERSATION_COMMENTS)
     .map((comment) => {
-      const body = stripPullfrogMarkers(comment.content ?? "");
+      const body = stripPullfrogMarkers(comment.content ?? "").slice(
+        0,
+        MAX_CONVERSATION_COMMENT_CHARS
+      );
       return "[" + authorLabel(comment) + " · comment " + comment.id + "]\n" + body;
-    })
-    .join("\n\n");
+    });
+
+  const selected: string[] = [];
+  let remaining = MAX_CONVERSATION_CHARS;
+  for (let index = rendered.length - 1; index >= 0 && remaining > 0; index--) {
+    const separator = selected.length > 0 ? 2 : 0;
+    if (remaining <= separator) break;
+    const piece = rendered[index]!.slice(0, remaining - separator);
+    selected.unshift(piece);
+    remaining -= piece.length + separator;
+  }
+  return selected.join("\n\n");
 }
 
 export function selectAzureFollowUp(params: {
