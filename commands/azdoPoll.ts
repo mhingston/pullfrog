@@ -25,6 +25,44 @@ export function parseAzureAllowedActorIds(raw: string | undefined): Set<string> 
   return new Set(values);
 }
 
+function parseStrictRfc3339(value: string): Date | undefined {
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/
+  );
+  if (!match) return undefined;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const zone = match[8]!;
+
+  if (
+    month < 1 ||
+    month > 12 ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59
+  ) {
+    return undefined;
+  }
+
+  const maxDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (day < 1 || day > maxDay) return undefined;
+
+  if (zone !== "Z") {
+    const zoneHour = Number(zone.slice(1, 3));
+    const zoneMinute = Number(zone.slice(4, 6));
+    if (zoneHour > 23 || zoneMinute > 59) return undefined;
+  }
+
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return undefined;
+  return new Date(timestamp);
+}
+
 export function parseAzurePollAfter(raw: string | undefined): Date {
   const value = raw?.trim();
   if (!value) {
@@ -32,9 +70,12 @@ export function parseAzurePollAfter(raw: string | undefined): Date {
       "automatic Azure follow-up polling requires --after or PULLFROG_AZDO_POLL_AFTER"
     );
   }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new Error("invalid Azure follow-up polling cutoff: " + value);
+  const parsed = parseStrictRfc3339(value);
+  if (!parsed) {
+    throw new Error(
+      "invalid Azure follow-up polling cutoff; expected RFC 3339 with explicit Z/offset: " +
+        value
+    );
   }
   return parsed;
 }
@@ -42,8 +83,7 @@ export function parseAzurePollAfter(raw: string | undefined): Date {
 function publishedAt(comment: AzureDevOpsComment): Date | undefined {
   const value = comment.publishedDate?.trim();
   if (!value) return undefined;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+  return parseStrictRfc3339(value);
 }
 
 export function selectAzurePollingCandidates(params: {
