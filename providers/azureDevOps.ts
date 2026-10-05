@@ -5,6 +5,9 @@ import {
   stripRefsHeads,
 } from "../utils/azureDevOps.ts";
 import type {
+  PullRequestDescriptionMutator,
+  PullRequestDescriptionMutationResult,
+  PullRequestDescriptionUpdate,
   PullRequestEvent,
   PullRequestReviewProvider,
   PullRequestSnapshot,
@@ -26,6 +29,50 @@ export interface AzureDevOpsReviewApi {
     markdown: string,
     sourceCommitId: string
   ): Promise<AzureDevOpsReviewPublication>;
+}
+
+export interface AzureDevOpsMutationApi {
+  updatePullRequestDescription(
+    description: string
+  ): Promise<AzureDevOpsPullRequestData>;
+}
+
+export class AzureDevOpsPullRequestDescriptionMutator
+  implements PullRequestDescriptionMutator
+{
+  readonly #ctx: AzureDevOpsContext;
+  readonly #client: AzureDevOpsMutationApi;
+
+  constructor(
+    ctx: AzureDevOpsContext,
+    client: AzureDevOpsMutationApi = new AzureDevOpsClient(ctx)
+  ) {
+    this.#ctx = ctx;
+    this.#client = client;
+  }
+
+  async updatePullRequestDescription(
+    update: PullRequestDescriptionUpdate
+  ): Promise<PullRequestDescriptionMutationResult> {
+    const pullRequest = await this.#client.updatePullRequestDescription(
+      update.description
+    );
+    if (pullRequest.pullRequestId !== this.#ctx.pullRequestId) {
+      throw new Error(
+        "Azure DevOps PR mutation returned unexpected pull request " +
+          pullRequest.pullRequestId
+      );
+    }
+
+    return {
+      provider: "azure-devops",
+      repository: { id: this.#ctx.repositoryId },
+      id: String(pullRequest.pullRequestId),
+      number: pullRequest.pullRequestId,
+      title: pullRequest.title,
+      description: pullRequest.description ?? "",
+    };
+  }
 }
 
 export class AzureDevOpsPullRequestProvider implements PullRequestReviewProvider {
