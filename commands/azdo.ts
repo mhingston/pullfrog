@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import arg from "arg";
 import {
   AZURE_API_KEY_ENV,
@@ -494,109 +495,162 @@ async function runFollowUp(params: {
     return;
   }
 
-  const sourceSha = pullRequest.lastMergeSourceCommit?.commitId?.trim().toLowerCase();
-  if (!sourceSha || !/^[0-9a-f]{40}$/.test(sourceSha)) {
-    throw new Error("Azure DevOps pull request is missing a valid source commit");
-  }
-  const sourceBranch = stripRefsHeads(pullRequest.sourceRefName);
-  const targetBranch = stripRefsHeads(pullRequest.targetRefName);
-  const diff = buildAzureDevOpsPullRequestDiff({
-    cwd: process.cwd(),
-    sourceBranch,
-    sourceCommitId: sourceSha,
-    targetBranch,
-  });
+  const claimId = randomUUID();
+  let reserved = false;
 
-  // Capture REST authorization in the client, then remove all Azure DevOps
-  // credentials before the model subprocess is created.
-  const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
-  try {
-    const model = resolveModel(params.model);
-    validateModelEnvironment(model);
-
-    const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-followup-"));
-    const priorTempDir = process.env.PULLFROG_TEMP_DIR;
-    process.env.PULLFROG_TEMP_DIR = tempDir;
-
-    try {
-      const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
-      const input = buildAzureFollowUpPrompt({
-        title: pullRequest.title,
-        description: pullRequest.description ?? "",
-        sourceBranch,
-        targetBranch,
-        sourceSha,
-        trigger: selection.trigger,
-        diff: diff.diff,
-        truncatedDiff: diff.truncated,
-      });
-
-      const childEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        HOME: tempDir,
-        PWD: tempDir,
-        XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
-        XDG_DATA_HOME: join(tempDir, "xdg-data"),
-        OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
-        OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
-        OPENCODE_DISABLE_PROJECT_CONFIG: "true",
-        OPENCODE_PURE: "true",
-        OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
-        OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
-        OPENCODE_DISABLE_CLAUDE_CODE: "true",
-        OPENCODE_EXPERIMENTAL: "false",
-        OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
-      };
-      delete childEnv.OPENCODE_CONFIG;
-      delete childEnv.OPENCODE_CONFIG_DIR;
-      delete childEnv.OPENCODE_TUI_CONFIG;
-
-      const child = spawnSync(cliPath, ["run", "--model", model, "--dir", tempDir], {
-        cwd: tempDir,
-        input,
-        encoding: "utf-8",
-        maxBuffer: 16 * 1024 * 1024,
-        env: childEnv,
-      });
-      if (child.error) throw child.error;
-      if (child.status !== 0) {
-        const details = stripAnsi(child.stderr || child.stdout || "");
-        throw new Error(
-          "OpenCode follow-up failed with exit " +
-            child.status +
-            (details ? ": " + details.slice(-4000) : "")
+  if (!params.dryRun) {
+    const reservation = await client.reserveThreadFollowUp({
+      threadId,
+      triggerCommentId: commentId,
+      claimId,
+    });
+    if (!reservation.reserved) {
+      if (reservation.reason === "handled") {
+        const reconciled = await client.reconcileThreadFollowUp({
+          threadId,
+          triggerCommentId: commentId,
+          resolve: params.resolve,
+        });
+        console.log(
+          reconciled
+            ? "Azure DevOps follow-up already handled by comment " +
+                reconciled.commentId +
+                (params.resolve ? "; thread resolved" : "")
+            : "Azure DevOps follow-up completed while reservation was being acquired"
+        );
+      } else {
+        console.log(
+          "skipping Azure DevOps follow-up: another worker reserved this request with comment " +
+            reservation.commentId
         );
       }
+      return;
+    }
+    reserved = true;
+  }
 
-      const answer = boundedReviewOutput(stripAnsi(child.stdout || ""), 30_000);
-      if (!answer) throw new Error("OpenCode returned an empty Azure DevOps follow-up");
+  try {
+    const sourceSha = pullRequest.lastMergeSourceCommit?.commitId?.trim().toLowerCase();
+    if (!sourceSha || !/^[0-9a-f]{40}$/.test(sourceSha)) {
+      throw new Error("Azure DevOps pull request is missing a valid source commit");
+    }
+    const sourceBranch = stripRefsHeads(pullRequest.sourceRefName);
+    const targetBranch = stripRefsHeads(pullRequest.targetRefName);
+    const diff = buildAzureDevOpsPullRequestDiff({
+      cwd: process.cwd(),
+      sourceBranch,
+      sourceCommitId: sourceSha,
+      targetBranch,
+    });
 
-      if (params.dryRun) {
-        console.log(answer);
-        return;
+    // Capture REST authorization in the client, then remove all Azure DevOps
+    // credentials before the model subprocess is created.
+    const restoreAzureDevOpsAuth = scrubAzureDevOpsAuth();
+    try {
+      const model = resolveModel(params.model);
+      validateModelEnvironment(model);
+
+      const tempDir = mkdtempSync(join(tmpdir(), "pullfrog-azdo-followup-"));
+      const priorTempDir = process.env.PULLFROG_TEMP_DIR;
+      process.env.PULLFROG_TEMP_DIR = tempDir;
+
+      try {
+        const cliPath = await installOpencodeCli({ binPath: "bin/opencode.exe" });
+        const input = buildAzureFollowUpPrompt({
+          title: pullRequest.title,
+          description: pullRequest.description ?? "",
+          sourceBranch,
+          targetBranch,
+          sourceSha,
+          trigger: selection.trigger,
+          diff: diff.diff,
+          truncatedDiff: diff.truncated,
+        });
+
+        const childEnv: NodeJS.ProcessEnv = {
+          ...process.env,
+          HOME: tempDir,
+          PWD: tempDir,
+          XDG_CONFIG_HOME: join(tempDir, "xdg-config"),
+          XDG_DATA_HOME: join(tempDir, "xdg-data"),
+          OPENCODE_CONFIG_CONTENT: buildOpenCodeConfig(model),
+          OPENCODE_PERMISSION: JSON.stringify(READ_ONLY_PERMISSIONS),
+          OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+          OPENCODE_PURE: "true",
+          OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+          OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+          OPENCODE_DISABLE_CLAUDE_CODE: "true",
+          OPENCODE_EXPERIMENTAL: "false",
+          OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
+        };
+        delete childEnv.OPENCODE_CONFIG;
+        delete childEnv.OPENCODE_CONFIG_DIR;
+        delete childEnv.OPENCODE_TUI_CONFIG;
+
+        const child = spawnSync(cliPath, ["run", "--model", model, "--dir", tempDir], {
+          cwd: tempDir,
+          input,
+          encoding: "utf-8",
+          maxBuffer: 16 * 1024 * 1024,
+          env: childEnv,
+        });
+        if (child.error) throw child.error;
+        if (child.status !== 0) {
+          const details = stripAnsi(child.stderr || child.stdout || "");
+          throw new Error(
+            "OpenCode follow-up failed with exit " +
+              child.status +
+              (details ? ": " + details.slice(-4000) : "")
+          );
+        }
+
+        const answer = boundedReviewOutput(stripAnsi(child.stdout || ""), 30_000);
+        if (!answer) throw new Error("OpenCode returned an empty Azure DevOps follow-up");
+
+        if (params.dryRun) {
+          console.log(answer);
+          return;
+        }
+
+        const publication = await client.replyToThreadFollowUp({
+          threadId,
+          triggerCommentId: commentId,
+          markdown: answer,
+          resolve: params.resolve,
+        });
+        console.log(
+          (publication.created ? "created" : "reused") +
+            " Azure DevOps follow-up comment " +
+            publication.commentId +
+            " in thread " +
+            threadId +
+            (params.resolve ? " and resolved the thread" : "")
+        );
+      } finally {
+        if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
+        else process.env.PULLFROG_TEMP_DIR = priorTempDir;
+        rmSync(tempDir, { recursive: true, force: true });
       }
-
-      const publication = await client.replyToThreadFollowUp({
-        threadId,
-        triggerCommentId: commentId,
-        markdown: answer,
-        resolve: params.resolve,
-      });
-      console.log(
-        (publication.created ? "created" : "reused") +
-          " Azure DevOps follow-up comment " +
-          publication.commentId +
-          " in thread " +
-          threadId +
-          (params.resolve ? " and resolved the thread" : "")
-      );
     } finally {
-      if (priorTempDir === undefined) delete process.env.PULLFROG_TEMP_DIR;
-      else process.env.PULLFROG_TEMP_DIR = priorTempDir;
-      rmSync(tempDir, { recursive: true, force: true });
+      restoreAzureDevOpsAuth();
     }
   } finally {
-    restoreAzureDevOpsAuth();
+    if (reserved) {
+      try {
+        await client.releaseThreadFollowUpReservation({
+          threadId,
+          triggerCommentId: commentId,
+          claimId,
+        });
+      } catch (error) {
+        // A leaked reservation self-heals after its lease expires. Do not mask
+        // the model/publication result with best-effort cleanup failure.
+        console.error(
+          "failed to release Azure DevOps follow-up reservation: " +
+            (error instanceof Error ? error.message : String(error))
+        );
+      }
+    }
   }
 }
 
