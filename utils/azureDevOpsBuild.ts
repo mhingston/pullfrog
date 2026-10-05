@@ -102,7 +102,13 @@ export function azureBuildPullRequestNumber(
     "system.pullRequest.pullRequestId"
   );
   const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+
+  const branchMatch = build.sourceBranch?.trim().match(
+    /^refs\/pull\/(\d+)\/merge$/
+  );
+  const branchPr = Number(branchMatch?.[1]);
+  return Number.isInteger(branchPr) && branchPr > 0 ? branchPr : undefined;
 }
 
 export function azureBuildPullRequestSourceSha(
@@ -122,6 +128,7 @@ export function buildMatchesPullRequestSource(params: {
   build: AzureDevOpsBuild;
   pullRequestId: number;
   sourceSha: string;
+  mergeSha?: string | undefined;
 }): boolean {
   const expectedSha = normalizeSha(params.sourceSha);
   if (!expectedSha) {
@@ -132,13 +139,22 @@ export function buildMatchesPullRequestSource(params: {
   if (buildPr !== undefined && buildPr !== params.pullRequestId) return false;
 
   const triggerSha = azureBuildPullRequestSourceSha(params.build);
-  if (triggerSha !== undefined) return triggerSha === expectedSha;
+  const headMatches =
+    triggerSha !== undefined
+      ? triggerSha === expectedSha
+      : normalizeSha(params.build.sourceVersion) === expectedSha;
+  if (!headMatches) return false;
 
-  // Azure PR validation builds normally expose pr.sourceSha in triggerInfo.
-  // A few older/custom pipelines expose the real source directly as
-  // sourceVersion instead of the synthetic merge SHA, so accept that exact
-  // fallback only. Never infer a match from branch names alone.
-  return normalizeSha(params.build.sourceVersion) === expectedSha;
+  const expectedMergeSha = normalizeSha(params.mergeSha);
+  if (params.mergeSha !== undefined && !expectedMergeSha) {
+    throw new Error("Azure build matching requires a valid PR merge SHA");
+  }
+  if (expectedMergeSha) {
+    const buildRevision = normalizeSha(params.build.sourceVersion);
+    if (!buildRevision || buildRevision !== expectedMergeSha) return false;
+  }
+
+  return true;
 }
 
 function redactExact(value: string, secret: string): string {
@@ -327,6 +343,7 @@ export class AzureDevOpsBuildClient {
   async listPullRequestBuilds(params: {
     pullRequestId: number;
     sourceSha: string;
+    mergeSha?: string | undefined;
     max?: number | undefined;
   }): Promise<AzureDevOpsBuild[]> {
     const max = params.max ?? 25;
@@ -350,6 +367,7 @@ export class AzureDevOpsBuildClient {
         build,
         pullRequestId: params.pullRequestId,
         sourceSha,
+        mergeSha: params.mergeSha,
       })
     );
   }
@@ -368,6 +386,7 @@ export class AzureDevOpsBuildClient {
     buildId: number;
     pullRequestId: number;
     sourceSha: string;
+    mergeSha?: string | undefined;
     secrets?: readonly string[] | undefined;
   }): Promise<AzureCiFailureContext> {
     const build = await this.getBuild(params.buildId);
@@ -376,6 +395,7 @@ export class AzureDevOpsBuildClient {
         build,
         pullRequestId: params.pullRequestId,
         sourceSha: params.sourceSha,
+        mergeSha: params.mergeSha,
       })
     ) {
       throw new Error(
@@ -455,6 +475,7 @@ export class AzureDevOpsBuildClient {
     buildId: number;
     pullRequestId: number;
     sourceSha: string;
+    mergeSha?: string | undefined;
   }): Promise<AzureDevOpsBuild> {
     const build = await this.getBuild(params.buildId);
     if (
@@ -462,6 +483,7 @@ export class AzureDevOpsBuildClient {
         build,
         pullRequestId: params.pullRequestId,
         sourceSha: params.sourceSha,
+        mergeSha: params.mergeSha,
       })
     ) {
       throw new Error(
