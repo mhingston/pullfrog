@@ -89,6 +89,8 @@ describeIntegration("Azure DevOps authenticated git integration", () => {
           permission: "enabled",
           message: "test: Azure authenticated fetch/push " + suffix,
           getLiveSourceCommitId: () => client.getBranchObjectId(branch),
+          verifyOwnership: (candidate) =>
+            client.hasPullfrogBranchOwnership(candidate),
         });
         cleanupSha = result.pushedSha;
 
