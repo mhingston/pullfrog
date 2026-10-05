@@ -91,16 +91,44 @@ function triggerValue(
   return undefined;
 }
 
+function buildParameterValue(
+  build: AzureDevOpsBuild,
+  ...keys: string[]
+): string | undefined {
+  if (!build.parameters?.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(build.parameters);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const values = parsed as Record<string, unknown>;
+  for (const key of keys) {
+    const value = values[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 export function azureBuildPullRequestNumber(
   build: AzureDevOpsBuild
 ): number | undefined {
-  const raw = triggerValue(
-    build,
-    "pr.number",
-    "pr.id",
-    "pullRequestId",
-    "system.pullRequest.pullRequestId"
-  );
+  const raw =
+    triggerValue(
+      build,
+      "pr.number",
+      "pr.id",
+      "pullRequestId",
+      "system.pullRequest.pullRequestId"
+    ) ??
+    buildParameterValue(
+      build,
+      "system.pullRequest.pullRequestId",
+      "System.PullRequest.PullRequestId"
+    );
   const parsed = Number(raw);
   if (Number.isInteger(parsed) && parsed > 0) return parsed;
 
@@ -120,7 +148,12 @@ export function azureBuildPullRequestSourceSha(
       "pr.sourceSha",
       "pr.sourceVersion",
       "system.pullRequest.sourceCommitId"
-    )
+    ) ??
+      buildParameterValue(
+        build,
+        "system.pullRequest.sourceCommitId",
+        "System.PullRequest.SourceCommitId"
+      )
   );
 }
 
@@ -507,6 +540,16 @@ export class AzureDevOpsBuildClient {
     ) {
       throw new Error(
         "refusing to requeue Azure build for a different PR/source revision"
+      );
+    }
+
+    const buildResult = build.result?.trim().toLowerCase();
+    if (
+      buildResult !== "failed" &&
+      buildResult !== "partiallysucceeded"
+    ) {
+      throw new Error(
+        "Azure DevOps build requeue requires a failed or partially succeeded build"
       );
     }
 
