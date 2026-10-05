@@ -437,9 +437,22 @@ describe("Azure DevOps safe PR mutations", () => {
 
   it("fails closed when the source branch moved before PR creation", async () => {
     const sourceBranch = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(sourceBranch);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(init?.method ?? "GET").toBe("GET");
-      expect(String(input)).toContain("/refs?");
+      const url = String(input);
+      if (
+        url.includes(
+          "/refs?filter=" + encodeURIComponent("heads/" + ownershipBranch)
+        )
+      ) {
+        return jsonResponse({
+          value: [{
+            name: "refs/heads/" + ownershipBranch,
+            objectId: targetCommitId,
+          }],
+        });
+      }
       return jsonResponse({
         value: [{ name: "refs/heads/" + sourceBranch, objectId: newerCommitId }],
       });
@@ -459,7 +472,7 @@ describe("Azure DevOps safe PR mutations", () => {
         permission: "enabled",
       })
     ).rejects.toThrow("source branch advanced");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("abandons a just-created PR if the source moves during creation", async () => {
