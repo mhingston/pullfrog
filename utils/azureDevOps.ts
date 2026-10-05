@@ -489,10 +489,7 @@ export class AzureDevOpsRepositoryClient {
       };
     }
 
-    if (
-      result.updateStatus === "staleOldObjectId" ||
-      result.updateStatus === "refNameConflict"
-    ) {
+    if (result.updateStatus === "staleOldObjectId") {
       return { acquired: false, reason: "claimed", refName };
     }
 
