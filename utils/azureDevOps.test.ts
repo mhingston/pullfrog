@@ -384,6 +384,27 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects internal Pullfrog refs as PR targets before any API call", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch: "pullfrog/branches/fix-42",
+        sourceCommitId,
+        targetBranch: "pullfrog/owners/internal",
+        title: "Fix",
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("internal Pullfrog refs cannot be PR targets");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("rejects Azure PR titles over 400 characters before any API call", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
