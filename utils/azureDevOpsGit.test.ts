@@ -200,6 +200,39 @@ describe("Azure DevOps merge repair safety", () => {
     }
   });
 
+  it("honors a file's configured conflict-marker-size", async () => {
+    const { root, sha } = makeRepo();
+    try {
+      git(root, ["checkout", "-b", "target-for-test", sha]);
+      writeFileSync(join(root, "target.txt"), "target\n");
+      git(root, ["add", "."]);
+      git(root, ["commit", "-m", "target"]);
+      const targetSha = git(root, ["rev-parse", "HEAD"]).toLowerCase();
+      git(root, ["checkout", "feature/write"]);
+      writeFileSync(join(root, ".gitattributes"), "base.txt conflict-marker-size=10\n");
+      writeFileSync(
+        join(root, "base.txt"),
+        "<<<<<<<<<< HEAD\nsource\n==========\ntarget\n>>>>>>>>>> target\n"
+      );
+      writeFileSync(join(root, ".git", "MERGE_HEAD"), targetSha + "\n");
+
+      await expect(
+        commitAndPushAzureDevOpsMergeResolution({
+          cwd: root,
+          ctx: context(sha),
+          permission: "restricted",
+          message: "fix: resolve merge",
+          targetSha,
+          conflictedFiles: ["base.txt"],
+          getLiveSourceCommitId: async () => sha,
+          getLiveTargetCommitId: async () => targetSha,
+        })
+      ).rejects.toThrow("conflict markers remain in base.txt");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed when the target moves during conflict resolution", async () => {
     const { root, sha } = makeRepo();
     try {
