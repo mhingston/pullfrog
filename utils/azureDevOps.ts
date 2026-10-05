@@ -1242,16 +1242,26 @@ export class AzureDevOpsClient {
     });
   }
 
-  async hasPullfrogReviewForSource(sourceCommitId: string): Promise<boolean> {
+  async hasPullfrogReviewForSource(
+    sourceCommitId: string,
+    trustedAuthorId: string
+  ): Promise<boolean> {
     const normalized = sourceCommitId.trim().toLowerCase();
     if (!/^[0-9a-f]{40}$/.test(normalized)) {
       throw new Error("Azure DevOps review lookup requires a valid source commit");
+    }
+    const trusted = trustedAuthorId.trim().toLowerCase();
+    if (!trusted) {
+      throw new Error(
+        "Azure DevOps review lookup requires a trusted immutable author id"
+      );
     }
     const marker = azureDevOpsReviewMarker(normalized);
     return (await this.listThreads()).some((thread) =>
       (thread.comments ?? []).some(
         (comment) =>
           !comment.isDeleted &&
+          comment.author?.id?.trim().toLowerCase() === trusted &&
           typeof comment.content === "string" &&
           comment.content.includes(marker)
       )
