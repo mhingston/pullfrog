@@ -390,6 +390,16 @@ export class AzureDevOpsBuildClient {
     secrets?: readonly string[] | undefined;
   }): Promise<AzureCiFailureContext> {
     const build = await this.getBuild(params.buildId);
+    const buildResult = build.result?.trim().toLowerCase();
+    if (
+      buildResult !== "failed" &&
+      buildResult !== "partiallysucceeded"
+    ) {
+      throw new Error(
+        "Azure DevOps build is not a failed validation build: " +
+          (build.result ?? "(no result)")
+      );
+    }
     if (
       !buildMatchesPullRequestSource({
         build,
@@ -478,6 +488,15 @@ export class AzureDevOpsBuildClient {
     mergeSha?: string | undefined;
   }): Promise<AzureDevOpsBuild> {
     const build = await this.getBuild(params.buildId);
+    const buildResult = build.result?.trim().toLowerCase();
+    if (
+      buildResult !== "failed" &&
+      buildResult !== "partiallysucceeded"
+    ) {
+      throw new Error(
+        "refusing to requeue Azure build that is not failed/partially succeeded"
+      );
+    }
     if (
       !buildMatchesPullRequestSource({
         build,
