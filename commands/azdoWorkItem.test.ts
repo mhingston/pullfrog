@@ -259,7 +259,8 @@ describe("Azure work-item context and model output", () => {
     });
     expect(prompt).toContain("Do not commit, push, change git remotes/config");
     expect(prompt).toContain("Pullfrog owns branch creation, commit");
-    expect(prompt).toContain("no shell, git metadata").not;
+    expect(prompt).not.toContain("SYSTEM_ACCESSTOKEN");
+    expect(prompt).not.toContain("AZURE_DEVOPS_PAT");
   });
 
   it("rejects model attempts to mutate fields outside configured policy", () => {
