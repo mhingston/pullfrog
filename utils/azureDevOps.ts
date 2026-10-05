@@ -439,6 +439,11 @@ export class AzureDevOpsRepositoryClient {
         "Azure DevOps PR creation requires the reserved Pullfrog source namespace pullfrog/branches/"
       );
     }
+    if (sourceBranch === this.#ctx.defaultBranch) {
+      throw new Error(
+        "Azure DevOps PR creation blocked: source branch is the repository default branch"
+      );
+    }
     if (sourceBranch === targetBranch) {
       throw new Error(
         "Azure DevOps PR creation blocked: source and target branches are identical"
