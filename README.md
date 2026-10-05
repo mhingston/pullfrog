@@ -217,13 +217,14 @@ steps:
 
 Configure these values as pipeline variables or a variable group, marking `AZURE_API_KEY` secret. `AZURE_CONTEXT` and `AZURE_MAX_OUTPUT` are the context-window and maximum-output token counts for the model behind your deployment.
 
-The Azure runtime is deliberately narrower than the GitHub Action today:
+The Azure runtime is still narrower than the GitHub Action, but now covers the main PR lifecycle:
 
-- automatic review, explicit thread follow-ups, and scheduled polling for authorized follow-up comments are implemented, and separate safe-write primitives can prepare/commit the current PR source branch; autonomous autofix, issue triage, CI-log repair, Service Hook transport, arbitrary branch/PR creation, and the Pullfrog cloud console remain GitHub-only;
-- it runs OpenCode in an isolated temporary workspace with all native tools denied and treats PR metadata/diff content as untrusted input;
+- automatic review, inline/status publication, explicit and scheduled thread follow-ups, safe PR-source writes, Pullfrog-owned branch/PR creation, bounded CI autofix, and merge-conflict repair are implemented;
+- Azure Boards/work-item triage, Service Hook transport, and the Pullfrog cloud console remain GitHub-only;
+- review/follow-up models run read-only; repair models receive only repository read/edit/glob/grep tools, with shell/web/task access denied, while Azure repository credentials are scrubbed before model execution;
 - it uses `System.AccessToken` by default; `AZURE_DEVOPS_PAT` is available as a local/debug fallback;
 - rerunning the validation updates the existing Pullfrog summary and same-location inline threads, and closes Pullfrog findings that disappeared;
-- `--dry-run` prints the review without writing to Azure DevOps, and `--model provider/model` can select a concrete OpenCode model that authenticates from pipeline environment variables instead of Azure OpenAI.
+- `--dry-run` is supported by review and repair commands, and `--model provider/model` can select a concrete OpenCode model that authenticates from pipeline environment variables instead of Azure OpenAI.
 
 For Azure Repos, grant the pipeline's build-service identity **Contribute to pull requests** on the repository. Keep `fetchDepth: 0` and `persistCredentials: true` for the current review step: Pullfrog compares `System.PullRequest.SourceCommitId` with the target branch rather than assuming the validation job's checked-out `HEAD` is the PR source commit. If you use the safe-write flow below, `azdo checkout` removes those persisted credentials before any code-writing process is allowed to touch the repository.
 
@@ -413,6 +414,84 @@ pnpm test:azdo-integration
 ```
 
 The test creates a temporary Pullfrog-owned branch, authenticated-fetches it, commits/pushes through the production CAS path, verifies the remote SHA, then deletes the branch and ownership ref. The extra repository-ID confirmation prevents accidentally enabling the destructive test against an unintended repository.
+
+### CI failure autofix
+
+`azdo autofix-ci` is intended to run **inside the failing Azure Repos build-validation job**, after the repository's normal validation steps. It identifies the failed build by `--build`, then `BUILD_BUILDID`, then exact PR/source discovery through the Azure Build API.
+
+A typical validation pipeline can add a final step like:
+
+```yaml
+  - script: >
+      npx --yes pullfrog azdo autofix-ci
+      --push restricted
+      --requeue
+    displayName: Pullfrog CI repair
+    condition: failed()
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+      # Opt-in policy. Both default to disabled.
+      PULLFROG_AZDO_FIX_CI_OWN_PRS: "enabled"
+      # Enable only if Pullfrog should modify human-authored PRs that it has
+      # already reviewed at the exact failing source SHA.
+      PULLFROG_AZDO_FIX_CI_REVIEWED_PRS: "enabled"
+      PULLFROG_AZDO_MAX_REPAIR_ATTEMPTS: "3"
+
+      AZURE_API_KEY: $(AZURE_API_KEY)
+      AZURE_RESOURCE_NAME: $(AZURE_RESOURCE_NAME)
+      AZURE_DEPLOYMENT: $(AZURE_DEPLOYMENT)
+      AZURE_CONTEXT: $(AZURE_CONTEXT)
+      AZURE_MAX_OUTPUT: $(AZURE_MAX_OUTPUT)
+```
+
+The CI repair path fails closed on identity and staleness:
+
+- the build must belong to the current PR and exact source commit; for normal Azure Repos policy builds Pullfrog reads `pr.number` plus the serialized `System.PullRequest.SourceCommitId` build parameter, and also pins the synthetic merge revision when Azure exposes one;
+- Pullfrog revalidates the live PR source and target before consuming a repair-attempt slot;
+- failed job/task logs are selected from the Azure build timeline, deduplicated by log ID, redacted, and bounded before they enter model context;
+- log text is explicitly treated as untrusted prompt data;
+- human-authored PRs are eligible only when `PULLFROG_AZDO_FIX_CI_REVIEWED_PRS` is enabled **and** Pullfrog previously published its review marker for that exact source SHA;
+- Pullfrog-authored PRs require `PULLFROG_AZDO_FIX_CI_OWN_PRS` and a valid Pullfrog branch-ownership ref;
+- before model execution Pullfrog atomically reserves a durable ref such as `refs/heads/pullfrog/repairs/pr-42/ci/attempt-1`; the source SHA stored in that ref suppresses duplicate workers and repeated repair of the same revision;
+- the attempt budget is deterministic (default 3, configurable from 1–10) and is retained across source updates rather than using a time-based lease;
+- the repair model can inspect/edit repository files but has no shell, web, task, or Azure repository credential access;
+- Pullfrog—not the model—revalidates the source, creates the commit, and CAS-pushes it through the #6 safe-write path.
+
+If the repair produces a commit, the source push normally causes Azure branch policy to run validation again. If the model concludes that no source change is needed, `--requeue` can queue the exact failed build definition again, but only while the PR source/target/merge revision still matches and only when the original build result is failed or partially succeeded.
+
+For an explicit operator retry without model repair:
+
+```bash
+pullfrog azdo requeue-build --build <failed-build-id>
+```
+
+The build-service identity needs normal build-read access for timelines/logs and permission to queue the relevant pipeline when requeue is enabled. The repository identity also needs the existing safe-write permissions plus branch creation under the durable `pullfrog/repairs/` coordination namespace.
+
+### Merge-conflict autofix
+
+`azdo autofix-conflicts` asks Azure Repos for the current PR `mergeStatus` and only proceeds for supported `conflicts` / merge-`failure` states. Because a conflicted PR may not produce a usable policy validation build, this command is designed to be invoked from a separately queued or scheduled pipeline with an explicit PR ID:
+
+```bash
+pullfrog azdo autofix-conflicts \
+  --pull-request 42 \
+  --push restricted \
+  --max-attempts 3
+```
+
+Conflict repair uses the same durable repair budget under `pullfrog/repairs/pr-<id>/conflict/attempt-<n>`. The parent process checks out the exact live PR source, resolves the exact live target commit, and starts `git merge --no-commit --no-ff` with Azure credentials removed, hooks isolated, system/global git config disabled, and executable local merge/filter configuration rejected.
+
+Only conflict-marked repository files are handed to the repair model for editing. The model cannot commit or push. Before finalization Pullfrog verifies that:
+
+- the local branch and `HEAD` are still the validated PR source;
+- `MERGE_HEAD` is still the validated target SHA;
+- no expected conflict markers or unmerged paths remain;
+- the live and freshly fetched source/target refs are unchanged;
+- changed Git-LFS files are still rejected.
+
+Pullfrog then creates the merge commit itself, verifies its first parent is the original source and second parent is the validated target, and CAS-pushes the PR source branch. Any failure leaves the remote untouched; the command attempts `git merge --abort` before returning when a local merge was prepared but not safely finalized.
+
+Use `--dry-run` to prepare/inspect the repair prompt without reserving a durable attempt or pushing a commit.
 
 ### Merge-gating status
 
