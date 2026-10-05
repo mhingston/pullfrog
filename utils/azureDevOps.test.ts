@@ -187,7 +187,7 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("atomically creates a Pullfrog branch and ownership proof", async () => {
+  it("CAS-creates a Pullfrog branch and ownership proof", async () => {
     const branchName = "pullfrog/branches/fix-42";
     const ownershipBranch = azureDevOpsBranchOwnershipBranch(branchName);
     const refPosts: unknown[] = [];
