@@ -1503,24 +1503,6 @@ async function runAutofixConflicts(params: {
     params.maxAttempts ??
       process.env.PULLFROG_AZDO_MAX_REPAIR_ATTEMPTS
   );
-  let attempt = 1;
-  if (!params.dryRun) {
-    const reservation = await repositoryClient.reserveRepairAttempt({
-      pullRequestId,
-      kind: "conflict",
-      sourceCommitId: sourceSha,
-      maxAttempts,
-    });
-    if (!reservation.acquired) {
-      console.log(
-        "skipping Azure DevOps conflict autofix: " +
-          reservation.reason +
-          (reservation.attempt ? " (attempt " + reservation.attempt + ")" : "")
-      );
-      return;
-    }
-    attempt = reservation.attempt;
-  }
 
   const gitContext = {
     ...repository,
@@ -1546,6 +1528,40 @@ async function runAutofixConflicts(params: {
     });
     mergePrepared = true;
 
+    if (params.dryRun) {
+      console.log(
+        buildAzureConflictRepairPrompt({
+          pullRequestId,
+          sourceBranch,
+          targetBranch,
+          sourceSha,
+          targetSha: prepared.targetSha,
+          attempt: 1,
+          conflictedFiles: prepared.conflictedFiles,
+          additionalInstructions:
+            params.instructions ??
+            process.env.PULLFROG_AZDO_CONFLICT_INSTRUCTIONS,
+        })
+      );
+      return;
+    }
+
+    const reservation = await repositoryClient.reserveRepairAttempt({
+      pullRequestId,
+      kind: "conflict",
+      sourceCommitId: sourceSha,
+      maxAttempts,
+    });
+    if (!reservation.acquired) {
+      console.log(
+        "skipping Azure DevOps conflict autofix: " +
+          reservation.reason +
+          (reservation.attempt ? " (attempt " + reservation.attempt + ")" : "")
+      );
+      return;
+    }
+    const attempt = reservation.attempt;
+
     const prompt = buildAzureConflictRepairPrompt({
       pullRequestId,
       sourceBranch,
@@ -1558,11 +1574,6 @@ async function runAutofixConflicts(params: {
         params.instructions ??
         process.env.PULLFROG_AZDO_CONFLICT_INSTRUCTIONS,
     });
-
-    if (params.dryRun) {
-      console.log(prompt);
-      return;
-    }
 
     if (prepared.conflictedFiles.length > 0) {
       const modelOutput = await runAzureRepairModel({
