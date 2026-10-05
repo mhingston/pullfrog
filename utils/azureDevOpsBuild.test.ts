@@ -53,6 +53,28 @@ describe("Azure Pipeline build matching", () => {
     ).toBe(false);
   });
 
+  it("matches Azure Repos PR metadata from the serialized build parameters fallback", () => {
+    const build: AzureDevOpsBuild = {
+      id: 10,
+      sourceBranch: "refs/pull/42/merge",
+      sourceVersion: "a".repeat(40),
+      triggerInfo: { "pr.number": "42", "pr.isFork": "False" },
+      parameters: JSON.stringify({
+        "system.pullRequest.pullRequestId": "42",
+        "system.pullRequest.sourceCommitId": sourceSha,
+      }),
+    };
+
+    expect(
+      buildMatchesPullRequestSource({
+        build,
+        pullRequestId: 42,
+        sourceSha,
+        mergeSha: "a".repeat(40),
+      })
+    ).toBe(true);
+  });
+
   it("does not infer a PR/source match from branch names", () => {
     expect(
       buildMatchesPullRequestSource({
@@ -257,6 +279,33 @@ describe("AzureDevOpsBuildClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("refuses to requeue a successful validation build", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        id: 10,
+        result: "succeeded",
+        definition: { id: 7 },
+        sourceBranch: "refs/pull/42/merge",
+        sourceVersion: "a".repeat(40),
+        triggerInfo: {
+          "pr.number": "42",
+          "pr.sourceSha": sourceSha,
+        },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsBuildClient(context());
+    await expect(
+      client.requeueBuild({
+        buildId: 10,
+        pullRequestId: 42,
+        sourceSha,
+      })
+    ).rejects.toThrow("failed or partially succeeded");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("requeues only the exact expected PR/source build", async () => {
     const bodies: unknown[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -266,6 +315,7 @@ describe("AzureDevOpsBuildClient", () => {
       if (url.endsWith("/builds/10?api-version=7.1")) {
         return jsonResponse({
           id: 10,
+          result: "failed",
           definition: { id: 7 },
           sourceBranch: "refs/pull/42/merge",
           sourceVersion: "a".repeat(40),
