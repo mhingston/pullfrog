@@ -546,34 +546,35 @@ export async function prepareAzureDevOpsMergeResolution(params: {
   mkdirSync(hooksDir);
   mkdirSync(homeDir);
 
-  let merge: ReturnType<typeof spawnSync>;
-  try {
-    merge = spawnSync(
-      "git",
-      [
-        "-c",
-        "credential.helper=",
-        "-c",
-        "core.hooksPath=" + hooksDir,
-        "merge",
-        "--no-commit",
-        "--no-ff",
-        remoteTrackingRef(targetBranch),
-      ],
-      {
-        cwd: params.cwd,
-        encoding: "utf-8",
-        maxBuffer: 32 * 1024 * 1024,
-        env: credentialFreeEnv({
-          HOME: homeDir,
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_CONFIG_GLOBAL: join(isolated, "global.gitconfig"),
-        }),
-      }
-    );
-  } finally {
-    rmSync(isolated, { recursive: true, force: true });
-  }
+  const merge = (() => {
+    try {
+      return spawnSync(
+        "git",
+        [
+          "-c",
+          "credential.helper=",
+          "-c",
+          "core.hooksPath=" + hooksDir,
+          "merge",
+          "--no-commit",
+          "--no-ff",
+          remoteTrackingRef(targetBranch),
+        ],
+        {
+          cwd: params.cwd,
+          encoding: "utf-8",
+          maxBuffer: 32 * 1024 * 1024,
+          env: credentialFreeEnv({
+            HOME: homeDir,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_GLOBAL: join(isolated, "global.gitconfig"),
+          }),
+        }
+      );
+    } finally {
+      rmSync(isolated, { recursive: true, force: true });
+    }
+  })();
   if (merge.error) throw merge.error;
 
   const mergeHead = inProgressGitRef(params.cwd, "MERGE_HEAD");
