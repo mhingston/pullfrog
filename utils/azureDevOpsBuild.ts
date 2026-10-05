@@ -73,6 +73,61 @@ const MAX_TOTAL_CHARS = 160_000;
 const MAX_INDEX_LINES = 100;
 const EXCERPT_RADIUS = 40;
 
+function boundFailurePayload(params: {
+  issues: string[];
+  index: AzureCiInterestingLine[];
+  excerpt: string;
+  maxChars: number;
+}): {
+  issues: string[];
+  index: AzureCiInterestingLine[];
+  excerpt: string;
+  truncated: boolean;
+  serializedChars: number;
+} {
+  const issues: string[] = [];
+  const index: AzureCiInterestingLine[] = [];
+  let excerpt = "";
+  const size = () => JSON.stringify({ issues, index, excerpt }).length;
+
+  for (const issue of params.issues) {
+    issues.push(issue);
+    if (size() > params.maxChars) {
+      issues.pop();
+      break;
+    }
+  }
+  for (const entry of params.index) {
+    index.push(entry);
+    if (size() > params.maxChars) {
+      index.pop();
+      break;
+    }
+  }
+
+  let low = 0;
+  let high = params.excerpt.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    excerpt = params.excerpt.slice(0, mid);
+    if (size() <= params.maxChars) low = mid;
+    else high = mid - 1;
+  }
+  excerpt = params.excerpt.slice(0, low);
+
+  const serializedChars = size();
+  return {
+    issues,
+    index,
+    excerpt,
+    truncated:
+      issues.length < params.issues.length ||
+      index.length < params.index.length ||
+      excerpt.length < params.excerpt.length,
+    serializedChars,
+  };
+}
+
 function normalizeSha(value: string | undefined): string | undefined {
   const normalized = value?.trim().toLowerCase();
   return normalized && /^[0-9a-f]{40}$/.test(normalized)
@@ -460,13 +515,15 @@ export class AzureDevOpsBuildClient {
   }): Promise<AzureCiFailureContext> {
     const build = await this.getBuild(params.buildId);
     const buildResult = build.result?.trim().toLowerCase();
-    if (
-      buildResult !== "failed" &&
-      buildResult !== "partiallysucceeded"
-    ) {
+    const buildStatus = build.status?.trim().toLowerCase();
+    const isCompletedFailure =
+      buildResult === "failed" || buildResult === "partiallysucceeded";
+    const isInProgressValidation =
+      buildStatus === "inprogress" && !buildResult;
+    if (!isCompletedFailure && !isInProgressValidation) {
       throw new Error(
         "Azure DevOps build is not a failed validation build: " +
-          (build.result ?? "(no result)")
+          (build.result ?? build.status ?? "(no result)")
       );
     }
     if (
@@ -506,7 +563,8 @@ export class AzureDevOpsBuildClient {
       const logId = record.log!.id!;
       if (seenLogs.has(logId)) continue;
       seenLogs.add(logId);
-      if (failedLogs.length >= MAX_LOGS || totalChars >= MAX_TOTAL_CHARS) {
+      const remaining = MAX_TOTAL_CHARS - totalChars;
+      if (failedLogs.length >= MAX_LOGS || remaining < 64) {
         truncated = true;
         break;
       }
@@ -518,14 +576,25 @@ export class AzureDevOpsBuildClient {
           logId +
           "?api-version=7.1"
       );
-      const remaining = Math.max(1, MAX_TOTAL_CHARS - totalChars);
       const maxChars = Math.min(MAX_LOG_CHARS, remaining);
       const analysis = analyzeAzurePipelineLog(raw, {
         secrets: params.secrets,
         maxChars,
       });
-      totalChars += Math.min(raw.length, maxChars);
-      if (analysis.truncated) truncated = true;
+      const rawIssues = (record.issues ?? [])
+        .map((issue) => issue.message?.trim())
+        .filter((message): message is string => Boolean(message))
+        .map((message) =>
+          redactAzurePipelineLog(message, params.secrets ?? []).slice(0, 2000)
+        );
+      const bounded = boundFailurePayload({
+        issues: rawIssues,
+        index: analysis.index,
+        excerpt: analysis.excerpt,
+        maxChars: remaining,
+      });
+      totalChars += bounded.serializedChars;
+      if (analysis.truncated || bounded.truncated) truncated = true;
 
       failedLogs.push({
         recordId: record.id,
@@ -533,13 +602,11 @@ export class AzureDevOpsBuildClient {
         recordType: record.type ?? "unknown",
         logId,
         result: record.result ?? "failed",
-        issues: (record.issues ?? [])
-          .map((issue) => issue.message?.trim())
-          .filter((message): message is string => Boolean(message))
-          .map((message) =>
-            redactAzurePipelineLog(message, params.secrets ?? []).slice(0, 2000)
-          ),
-        ...analysis,
+        issues: bounded.issues,
+        totalLines: analysis.totalLines,
+        truncated: analysis.truncated || bounded.truncated,
+        index: bounded.index,
+        excerpt: bounded.excerpt,
       });
     }
 
