@@ -91,14 +91,14 @@ describe("Azure CI autofix eligibility", () => {
 });
 
 describe("Azure merge-conflict detection", () => {
-  it.each(["conflicts", "Conflicts", "failure"])(
+  it.each(["conflicts", "Conflicts"])(
     "treats %s as requiring repair",
     (status) => {
       expect(azureMergeStatusNeedsRepair(status)).toBe(true);
     }
   );
 
-  it.each([undefined, "succeeded", "queued", "rejectedByPolicy"])(
+  it.each([undefined, "failure", "succeeded", "queued", "rejectedByPolicy"])(
     "does not treat %s as a supported conflict state",
     (status) => {
       expect(azureMergeStatusNeedsRepair(status)).toBe(false);
