@@ -436,7 +436,7 @@ export class AzureDevOpsRepositoryClient {
     const targetBranch = validateAzureDevOpsBranchName(params.targetBranch);
     if (!sourceBranch.startsWith("pullfrog/branches/")) {
       throw new Error(
-        "Azure DevOps PR creation requires a Pullfrog-owned source branch under pullfrog/branches/"
+        "Azure DevOps PR creation requires the reserved Pullfrog source namespace pullfrog/branches/"
       );
     }
     if (sourceBranch === targetBranch) {
