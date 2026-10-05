@@ -33,7 +33,8 @@ export interface AzureDevOpsReviewApi {
 
 export interface AzureDevOpsMutationApi {
   updatePullRequestDescription(
-    description: string
+    description: string,
+    expectedSourceCommitId: string
   ): Promise<AzureDevOpsPullRequestData>;
 }
 
@@ -55,7 +56,8 @@ export class AzureDevOpsPullRequestDescriptionMutator
     update: PullRequestDescriptionUpdate
   ): Promise<PullRequestDescriptionMutationResult> {
     const pullRequest = await this.#client.updatePullRequestDescription(
-      update.description
+      update.description,
+      this.#ctx.sourceCommitId
     );
     if (pullRequest.pullRequestId !== this.#ctx.pullRequestId) {
       throw new Error(
