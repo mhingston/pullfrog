@@ -220,7 +220,7 @@ Configure these values as pipeline variables or a variable group, marking `AZURE
 The Azure runtime is still narrower than the GitHub Action, but now covers the main PR lifecycle:
 
 - automatic review, inline/status publication, explicit and scheduled thread follow-ups, safe PR-source writes, Pullfrog-owned branch/PR creation, bounded CI autofix, and merge-conflict repair are implemented;
-- Azure Boards/work-item triage, Service Hook transport, and the Pullfrog cloud console remain GitHub-only;
+- Azure Boards work-item triage, bounded search, comments, allowlisted updates, and repository-level plan/build tasks are implemented; Service Hook transport and the Pullfrog cloud console remain GitHub-only;
 - review/follow-up models run read-only; repair models receive only repository read/edit/glob/grep tools, with shell/web/task access denied, while Azure repository credentials are scrubbed before model execution;
 - it uses `System.AccessToken` by default; `AZURE_DEVOPS_PAT` is available as a local/debug fallback;
 - rerunning the validation updates the existing Pullfrog summary and same-location inline threads, and closes Pullfrog findings that disappeared;
@@ -336,6 +336,102 @@ The lock has no lease or time-based expiry. That is intentional: a long-running 
 Because the lock lives in Git refs rather than PR comments, arbitrary commenters cannot forge or delete coordination state by pasting marker text. Azure's branch-folder permission model can restrict `Create branch` to the `pullfrog/locks` namespace; branch creators receive direct permissions on branches they create, which permits normal cleanup of their own transient lock refs.
 
 The immutable actor allowlist is the authorization boundary for **automatic** polling. The manually queued `follow-up` command retains its separate pipeline-queue authorization model, but both transports share the same atomic ref-lock path so a manual run and scheduled poll cannot process the same request concurrently. `--dry-run` remains write-free and does not create a lock.
+
+### Azure Boards work-item triage and repository tasks
+
+Azure Boards uses the same **conceptual issue configuration** as the GitHub runtime rather than a parallel Azure-only mode catalogue:
+
+- `PULLFROG_ISSUE_MODE=none|links|plan|build|custom` projects the existing `issue.mode` concept into the pipeline runtime;
+- `PULLFROG_ISSUE_INSTRUCTIONS` carries the existing issue/work-item instructions;
+- `PULLFROG_LABEL_ENABLED` and `PULLFROG_LABEL_INSTRUCTIONS` project issue-label behavior onto Azure **tags**;
+- Azure-only security constraints stay narrow: `PULLFROG_AZDO_ALLOWED_ACTOR_IDS`, `PULLFROG_AZDO_WORK_ITEM_ALLOWED_FIELDS`, and `PULLFROG_AZDO_WORK_ITEM_ALLOWED_STATES`.
+
+A manually queued run can handle a created work item:
+
+```bash
+pullfrog azdo work-item \
+  --work-item 42 \
+  --mode plan \
+  --allowed-actor-ids "$PULLFROG_AZDO_ALLOWED_ACTOR_IDS"
+```
+
+or one explicit discussion comment:
+
+```bash
+pullfrog azdo work-item \
+  --work-item 42 \
+  --comment 17 \
+  --allowed-actor-ids "$PULLFROG_AZDO_ALLOWED_ACTOR_IDS"
+```
+
+Work-item comments must explicitly mention `@pullfrog`. They can also choose an action, for example `@pullfrog links`, `@pullfrog plan`, `@pullfrog build`, or `@pullfrog custom ...`. An explicit comment action can opt into a one-off task even when automatic created-item handling is `none`.
+
+Automatic discovery does not require Service Hooks. A scheduled pipeline can use:
+
+```bash
+pullfrog azdo poll-work-items \
+  --after 2026-10-05T00:00:00Z \
+  --max 5
+```
+
+with `PULLFROG_AZDO_ALLOWED_ACTOR_IDS` set to comma-separated immutable Azure IdentityRef IDs. The poller uses bounded WIQL over recently changed project work items, then considers only created items or comments at/after the rollout cutoff. Display names and email addresses are never authorization inputs.
+
+#### GitHub issue → Azure Boards mapping
+
+| Pullfrog concept | GitHub | Azure Boards |
+| --- | --- | --- |
+| issue identity | issue number | work-item ID + revision |
+| title/body/state | native issue fields | `System.Title`, description/repro steps, `System.State` |
+| labels | labels | tags |
+| assignee/author | GitHub login | normalized Azure identity with immutable `id` |
+| discussion | issue comments | Work Item Comments API |
+| relationships | cross-reference / commit timeline events | work-item relations + artifact links (work items, PRs, commits, hyperlinks) |
+| search | bounded GitHub issue search | bounded project-scoped WIQL retrieval |
+| similar issues | hosted Pullfrog similarity candidate retrieval | no fabricated equivalent; WIQL candidates are retrieval only |
+| milestone | milestone | no forced mapping; Azure iteration/process fields remain platform-specific |
+| plan/fix enrichment links | Pullfrog hosted trigger URLs | explicit `@pullfrog plan/build` comments or queued pipeline parameters |
+
+Pullfrog reads complete discussion only up to explicit item/count/character bounds, caps relationship/search context, and treats **all** work-item/comment/relation/search text as untrusted prompt data. Repository files are likewise untrusted context. Only the selected request and configured Pullfrog instructions are instructions to the model.
+
+Work-item mutations fail closed:
+
+- there is no generic JSON Patch tool or arbitrary field-reference update;
+- model-controlled writes are limited to tags and/or state, and only when those fields are explicitly listed in `PULLFROG_AZDO_WORK_ITEM_ALLOWED_FIELDS`;
+- state mutation additionally requires an explicit `PULLFROG_AZDO_WORK_ITEM_ALLOWED_STATES` allowlist;
+- every work-item update carries an optimistic-concurrency revision test and is rejected if the item advanced;
+- generated implementation PRs may add a Pullfrog-owned hyperlink relation; its URL is generated by the parent process, not by the model.
+
+For automatic or manually selected work-item execution, Pullfrog also creates a deterministic coordination ref under:
+
+```text
+refs/heads/pullfrog/locks/work-item/
+```
+
+The lock key includes the immutable work-item ID, revision, and triggering comment ID (or created-event identity). Creation is an all-zero old-object CAS; contention exits before model work. Release uses the exact repository commit used to anchor the lock. A failed release leaves the lock in place and therefore fails closed rather than permitting duplicate execution.
+
+#### Repository-level work-item tasks
+
+`links` is deterministic and model-free: it posts explicit Azure work-item/PR/commit relationships plus bounded WIQL candidates.
+
+`plan` and `custom` run the model with repository **read/glob/grep** access only. Shell, edits, web access, subagents, project config/plugins/skills, `.git/config`, external directories, and Azure repository credentials remain denied. The parent validates the model's structured response before applying any allowlisted tag/state mutations.
+
+`build` requires `--push enabled` (or `PULLFROG_PUSH=enabled`) because it creates a new Pullfrog-owned branch. The flow deliberately reuses the safe-write path established for Azure Repos:
+
+1. authenticate/authorize the immutable work-item actor and acquire the deterministic event lock;
+2. fetch bounded work-item/discussion/relationship/search context;
+3. create a branch under `pullfrog/branches/work-item-...` from an exact default-branch SHA, with the normal ownership proof;
+4. prepare the branch checkout and remove persisted git credentials;
+5. run the code-writing model with repository read/edit/glob/grep only—no shell, git metadata, web, or Azure credentials;
+6. reject the result if the work item advanced while the model was working;
+7. have the parent create the commit and CAS-push through the existing owned-branch safe-write path;
+8. create the Azure Repos PR through the existing ownership/source-staleness checks;
+9. record the generated PR on the work item as a hyperlink where possible and post the final marked response.
+
+If the model makes no working-tree changes, Pullfrog deletes the temporary Pullfrog branch and records that no PR was opened. If PR creation fails, it attempts to clean up the Pullfrog-owned branch. It never deletes user-owned branches, work items, or PRs.
+
+The build-service identity needs Azure Boards read/comment access for `links/plan/custom`. Tag/state updates require work-item write permission. `build` additionally needs the existing Azure Repos branch/PR permissions plus scoped branch creation under `pullfrog/branches` and `pullfrog/locks/work-item`.
+
+Service Hooks are intentionally a transport follow-up rather than part of the work-item domain model. The CI/manual/polling path is usable without webhook administration, and a future Service Hook adapter can feed the same normalized work-item trigger/auth/deduplication semantics.
 
 ### Safe PR-source writes
 
@@ -513,7 +609,7 @@ Inline findings are only created when Pullfrog can validate the model's file/lin
 
 The Azure review path now runs through the same provider-neutral PR-review contract that can be implemented by GitHub: a small `PullRequestReader` + `ReviewPublisher` boundary and a normalized Pullfrog PR snapshot. Platform SDK/REST response types stay inside their adapters rather than leaking into review orchestration.
 
-Azure Pipelines build validation is treated as the automatic `validation` PR event adapter. Interactive follow-ups support both explicit PR/thread/comment invocation and scheduled polling of active PR threads. Service Hooks can later become another transport while reusing the same trigger selection, actor authorization, and idempotent reply path.
+Azure Pipelines build validation is treated as the automatic `validation` PR event adapter. Interactive PR follow-ups and Azure Boards work items both support explicit/manual invocation plus scheduled polling. Boards uses separate capability-sized work-item reader/comment/mutator/search contracts rather than expanding the PR provider into a giant generic SCM abstraction. Service Hooks can later become another transport while reusing the same normalized trigger selection, immutable-actor authorization, and deterministic deduplication paths.
 
 The Azure token boundary is unchanged. The provider captures REST authorization before Pullfrog scrubs Azure DevOps credentials from the process environment; the isolated OpenCode subprocess still cannot access `System.AccessToken`, `AZURE_DEVOPS_TOKEN`, or `AZURE_DEVOPS_PAT`.
 
