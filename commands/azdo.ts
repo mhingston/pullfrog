@@ -2,7 +2,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import arg from "arg";
 import {
   AZURE_API_KEY_ENV,
@@ -466,6 +465,7 @@ async function runFollowUp(params: {
   const threadId = requireCliPositiveInteger("--thread", params.thread);
   const commentId = requireCliPositiveInteger("--comment", params.comment);
   const client = new AzureDevOpsClient({ ...repository, pullRequestId });
+  const repositoryClient = new AzureDevOpsRepositoryClient(repository);
 
   const pullRequest = await client.getPullRequest();
   const thread = await client.getThread(threadId);
@@ -495,45 +495,34 @@ async function runFollowUp(params: {
     return;
   }
 
-  const claimId = randomUUID();
-  let reserved = false;
-
-  if (!params.dryRun) {
-    const reservation = await client.reserveThreadFollowUp({
-      threadId,
-      triggerCommentId: commentId,
-      claimId,
-    });
-    if (!reservation.reserved) {
-      if (reservation.reason === "handled") {
-        const reconciled = await client.reconcileThreadFollowUp({
-          threadId,
-          triggerCommentId: commentId,
-          resolve: params.resolve,
-        });
-        console.log(
-          reconciled
-            ? "Azure DevOps follow-up already handled by comment " +
-                reconciled.commentId +
-                (params.resolve ? "; thread resolved" : "")
-            : "Azure DevOps follow-up completed while reservation was being acquired"
-        );
-      } else {
-        console.log(
-          "skipping Azure DevOps follow-up: another worker reserved this request with comment " +
-            reservation.commentId
-        );
-      }
-      return;
-    }
-    reserved = true;
+  const sourceSha = pullRequest.lastMergeSourceCommit?.commitId?.trim().toLowerCase();
+  if (!sourceSha || !/^[0-9a-f]{40}$/.test(sourceSha)) {
+    throw new Error("Azure DevOps pull request is missing a valid source commit");
   }
 
-  try {
-    const sourceSha = pullRequest.lastMergeSourceCommit?.commitId?.trim().toLowerCase();
-    if (!sourceSha || !/^[0-9a-f]{40}$/.test(sourceSha)) {
-      throw new Error("Azure DevOps pull request is missing a valid source commit");
+  let acquiredLock:
+    | { refName: string; sourceCommitId: string }
+    | undefined;
+
+  if (!params.dryRun) {
+    const lockResult = await repositoryClient.acquireFollowUpLock({
+      pullRequestId,
+      threadId,
+      triggerCommentId: commentId,
+      sourceCommitId: sourceSha,
+    });
+    if (!lockResult.acquired) {
+      console.log(
+        "skipping Azure DevOps follow-up: another worker owns lock " +
+          lockResult.refName
+      );
+      return;
     }
+    acquiredLock = lockResult.lock;
+  }
+
+  let completed = false;
+  try {
     const sourceBranch = stripRefsHeads(pullRequest.sourceRefName);
     const targetBranch = stripRefsHeads(pullRequest.targetRefName);
     const diff = buildAzureDevOpsPullRequestDiff({
@@ -618,6 +607,7 @@ async function runFollowUp(params: {
           markdown: answer,
           resolve: params.resolve,
         });
+        completed = true;
         console.log(
           (publication.created ? "created" : "reused") +
             " Azure DevOps follow-up comment " +
@@ -635,18 +625,16 @@ async function runFollowUp(params: {
       restoreAzureDevOpsAuth();
     }
   } finally {
-    if (reserved) {
+    if (acquiredLock) {
       try {
-        await client.releaseThreadFollowUpReservation({
-          threadId,
-          triggerCommentId: commentId,
-          claimId,
-        });
+        await repositoryClient.releaseFollowUpLock(acquiredLock);
       } catch (error) {
-        // A leaked reservation self-heals after its lease expires. Do not mask
-        // the model/publication result with best-effort cleanup failure.
+        // A failed release leaves the deterministic ref in place and therefore
+        // fails closed. Do not hide the model/publication result.
         console.error(
-          "failed to release Azure DevOps follow-up reservation: " +
+          "failed to release Azure DevOps follow-up lock" +
+            (completed ? " after publication" : "") +
+            ": " +
             (error instanceof Error ? error.message : String(error))
         );
       }
