@@ -407,7 +407,7 @@ For automatic or manually selected work-item execution, Pullfrog also creates a 
 refs/heads/pullfrog/locks/work-item/
 ```
 
-The lock key includes the immutable work-item ID, revision, and triggering comment ID (or created-event identity). Creation is an all-zero old-object CAS; contention exits before model work. Release uses the exact repository commit used to anchor the lock. A failed release leaves the lock in place and therefore fails closed rather than permitting duplicate execution.
+The lock key includes only immutable event identity: work-item ID plus triggering comment ID, or the created-item event. Work-item revision is deliberately not part of the lock key, so an unrelated edit cannot allow the same comment event to execute concurrently under a new lock name. Revision remains a separate stale-write guard. Creation is an all-zero old-object CAS; contention exits before model work. Release uses the exact repository commit used to anchor the lock. A failed release leaves the lock in place and therefore fails closed rather than permitting duplicate execution.
 
 #### Repository-level work-item tasks
 
