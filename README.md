@@ -510,7 +510,7 @@ pullfrog azdo create-pr \
   --title "fix: apply Pullfrog changes"
 ```
 
-New-branch creation is not authorized by branch naming alone. Pullfrog creates a deterministic companion ownership ref under `pullfrog/owners/` and `create-pr` requires that proof before it will open a PR. Branch creation itself uses `oldObjectId=000...000`, so an existing/racing branch fails closed. PR creation revalidates the exact source SHA before and after Azure's non-conditional create request; if the source moves during creation, Pullfrog immediately abandons the new PR.
+New-branch creation is not authorized by branch naming alone. Pullfrog creates a deterministic companion ref under `pullfrog/owners/` and `create-pr` requires it as a coordination/provenance check before it will open a PR. **That ref is not an authorization boundary**: repository identities that can freely create refs could forge it, so automatic write authorization must come from the pipeline identity/permissions and the exact-source trusted-review checks described below. Restrict creation/update/deletion of the `pullfrog/*` namespaces to the build-service identity where repository permissions allow it. Branch creation itself uses `oldObjectId=000...000`, so an existing/racing branch fails closed. PR creation revalidates the exact source SHA before and after Azure's non-conditional create request; if the source moves during creation, Pullfrog immediately abandons the new PR.
 
 Authenticated git always runs in an isolated environment with hooks and credential helpers disabled while the Azure credential is live. Changed Git-LFS files remain unsupported because safely pushing them requires the LFS pre-push hook.
 
@@ -566,13 +566,13 @@ The CI repair path fails closed on identity and staleness:
 - failed job/task logs—and `succeededWithIssues` diagnostics for partially-succeeded builds—are selected from the Azure build timeline, deduplicated by log ID, redacted, and bounded before they enter model context;
 - log text is explicitly treated as untrusted prompt data;
 - human-authored PRs are eligible only when `PULLFROG_AZDO_FIX_CI_REVIEWED_PRS` is enabled and a review marker for that exact source SHA was authored by the immutable Azure identity configured in `PULLFROG_AZDO_REVIEW_IDENTITY_ID`; marker text from the PR author is never sufficient;
-- Pullfrog-authored PRs require `PULLFROG_AZDO_FIX_CI_OWN_PRS` and a valid Pullfrog branch-ownership ref;
+- Pullfrog-authored PRs require `PULLFROG_AZDO_FIX_CI_OWN_PRS`, the companion ownership ref, **and** an exact-source review marker authored by the immutable identity in `PULLFROG_AZDO_REVIEW_IDENTITY_ID`; the deterministic ownership ref alone never authorizes an autofix;
 - before model execution Pullfrog atomically reserves a durable ref such as `refs/heads/pullfrog/repairs/pr-42/ci/attempt-1`; the source SHA stored in that ref suppresses duplicate workers and repeated repair of the same revision;
 - the attempt budget is deterministic (default 3, configurable from 1–10) and is retained across source updates rather than using a time-based lease;
 - the repair model can inspect/edit repository files but has no shell, web, task, or Azure repository credential access;
 - Pullfrog—not the model—revalidates the source, creates the commit, and CAS-pushes it through the #6 safe-write path.
 
-If the repair produces a commit, the source push normally causes Azure branch policy to run validation again. If the model concludes that no source change is needed, `--requeue` can queue the exact failed build definition again, but only while the PR source/target/merge revision still matches and only when the original build result is failed or partially succeeded.
+If the repair produces a commit, the source push normally causes Azure branch policy to run validation again. When `autofix-ci` runs inside the failing job, Pullfrog may collect failed timeline records while the overall build is still `inProgress`; that allows repair without pretending the build has already completed. If the model concludes that no source change is needed, `--requeue` queues nothing until the original build has a final `failed` or `partiallySucceeded` result. A completed failed build can then be requeued only while the PR source/target/merge revision still matches.
 
 For an explicit operator retry without model repair:
 
