@@ -1820,11 +1820,45 @@ export class AzureDevOpsClient {
     );
   }
 
+  #isPullfrogManagedThreadStatus(thread: AzureDevOpsThread): boolean {
+    const status = thread.status;
+    if (status === undefined) return true;
+    if (typeof status === "number") {
+      return status === 0 || status === 1 || status === 4;
+    }
+    const normalized = status.trim().toLowerCase().replace(/[\s_-]/g, "");
+    return (
+      normalized === "" ||
+      normalized === "0" ||
+      normalized === "1" ||
+      normalized === "4" ||
+      normalized === "unknown" ||
+      normalized === "active" ||
+      normalized === "closed"
+    );
+  }
+
   async #setThreadStatus(threadId: number, status: 1 | 4): Promise<void> {
     await this.#request("/threads/" + threadId + "?api-version=7.1", {
       method: "PATCH",
       body: JSON.stringify({ status }),
     });
+  }
+
+  async #setThreadStatusIfManaged(
+    thread: AzureDevOpsThread,
+    status: 1 | 4
+  ): Promise<void> {
+    if (!this.#isPullfrogManagedThreadStatus(thread)) return;
+    const current = thread.status;
+    if (
+      current === status ||
+      (status === 1 && String(current).trim().toLowerCase() === "active") ||
+      (status === 4 && String(current).trim().toLowerCase() === "closed")
+    ) {
+      return;
+    }
+    await this.#setThreadStatus(thread.id, status);
   }
 
   async getLiveSourceCommitId(): Promise<string | undefined> {
@@ -1900,12 +1934,14 @@ export class AzureDevOpsClient {
       );
 
       if (existing) {
-        await this.#updateReviewComment(
-          existing.thread.id,
-          existing.comment.id,
-          entry.content
-        );
-        await this.#setThreadStatus(existing.thread.id, 1);
+        if (this.#isPullfrogManagedThreadStatus(existing.thread)) {
+          await this.#updateReviewComment(
+            existing.thread.id,
+            existing.comment.id,
+            entry.content
+          );
+          await this.#setThreadStatusIfManaged(existing.thread, 1);
+        }
         continue;
       }
 
@@ -1931,9 +1967,9 @@ export class AzureDevOpsClient {
           pullRequestThreadContext: {
             changeTrackingId: entry.changeTrackingId,
             iterationContext: {
-              // Azure iteration zero is the common source/target commit; the
-              // model reviewed the cumulative PR diff against that base.
-              firstComparingIteration: 0,
+              // Equal first/second iterations tell Azure to anchor against
+              // the common source/target commit for this cumulative iteration.
+              firstComparingIteration: context.iterationId,
               secondComparingIteration: context.iterationId,
             },
           },
@@ -1954,7 +1990,7 @@ export class AzureDevOpsClient {
     if (liveAfter !== normalizedSourceCommitId) {
       for (const entry of after) {
         if (entry.sourceCommitId === normalizedSourceCommitId) {
-          await this.#setThreadStatus(entry.thread.id, 4);
+          await this.#setThreadStatusIfManaged(entry.thread, 4);
         }
       }
       return { published: false, supersededBy: liveAfter };
@@ -1976,9 +2012,18 @@ export class AzureDevOpsClient {
         desired.has(entry.fingerprint);
       const group =
         grouped.get(entry.sourceCommitId + ":" + entry.fingerprint) ?? [];
-      const canonical = group[0];
-      const shouldBeActive = isDesired && canonical?.thread.id === entry.thread.id;
-      await this.#setThreadStatus(entry.thread.id, shouldBeActive ? 1 : 4);
+      const canonical = group.find((candidate) =>
+        this.#isPullfrogManagedThreadStatus(candidate.thread)
+      );
+      const manageable = this.#isPullfrogManagedThreadStatus(entry.thread);
+      const shouldBeActive =
+        manageable &&
+        isDesired &&
+        canonical?.thread.id === entry.thread.id;
+      await this.#setThreadStatusIfManaged(
+        entry.thread,
+        shouldBeActive ? 1 : 4
+      );
       if (shouldBeActive) activeThreadIds.push(entry.thread.id);
     }
 
@@ -2018,9 +2063,18 @@ export class AzureDevOpsClient {
     let candidateThreadId: number;
 
     if (before.length > 0) {
-      const canonical = before[0]!;
-      await this.#updateReviewComment(canonical.thread.id, canonical.comment.id, content);
-      await this.#setThreadStatus(canonical.thread.id, 1);
+      const canonical =
+        before.find((entry) =>
+          this.#isPullfrogManagedThreadStatus(entry.thread)
+        ) ?? before[0]!;
+      if (this.#isPullfrogManagedThreadStatus(canonical.thread)) {
+        await this.#updateReviewComment(
+          canonical.thread.id,
+          canonical.comment.id,
+          content
+        );
+        await this.#setThreadStatusIfManaged(canonical.thread, 1);
+      }
       candidateThreadId = canonical.thread.id;
     } else {
       const posted = await this.#request<AzureDevOpsThread>("/threads?api-version=7.1", {
@@ -2046,12 +2100,21 @@ export class AzureDevOpsClient {
     const after = this.#markedThreads(await this.listThreads(), trusted);
     const liveAfter = (await this.getLiveSourceCommitId()) ?? normalizedSourceCommitId;
     const liveThreads = after.filter((entry) => entry.sourceCommitId === liveAfter);
-    const canonicalLive = liveThreads[0];
+    const canonicalLive =
+      liveThreads.find((entry) =>
+        this.#isPullfrogManagedThreadStatus(entry.thread)
+      ) ?? liveThreads[0];
 
     for (const entry of after) {
+      const manageable = this.#isPullfrogManagedThreadStatus(entry.thread);
       const shouldBeActive =
-        entry.sourceCommitId === liveAfter && entry.thread.id === canonicalLive?.thread.id;
-      await this.#setThreadStatus(entry.thread.id, shouldBeActive ? 1 : 4);
+        manageable &&
+        entry.sourceCommitId === liveAfter &&
+        entry.thread.id === canonicalLive?.thread.id;
+      await this.#setThreadStatusIfManaged(
+        entry.thread,
+        shouldBeActive ? 1 : 4
+      );
     }
 
     if (liveAfter !== normalizedSourceCommitId) {
