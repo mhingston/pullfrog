@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 export type AzureDevOpsPushPermission = "disabled" | "restricted" | "enabled";
 
+export const AZURE_DEVOPS_PULLFROG_BRANCH_PREFIX = "pullfrog/branches/";
+
 export interface AzureDevOpsGitContext {
   collectionUri: string;
   repositoryUri: string;
@@ -117,6 +119,17 @@ export function validateAzureDevOpsBranchName(branch: string): string {
     throw new Error("Azure DevOps branch is not a valid git branch name: " + branch);
   }
   return trimmed;
+}
+
+export function validateAzureDevOpsPullfrogBranch(branch: string): string {
+  const validated = validateAzureDevOpsBranchName(branch);
+  if (!validated.startsWith(AZURE_DEVOPS_PULLFROG_BRANCH_PREFIX)) {
+    throw new Error(
+      "Azure DevOps enabled-mode branch must be under " +
+        AZURE_DEVOPS_PULLFROG_BRANCH_PREFIX
+    );
+  }
+  return validated;
 }
 
 export function parseAzureDevOpsPushPermission(
@@ -359,6 +372,26 @@ export function prepareAzureDevOpsSourceCheckout(params: {
   return { branch, sha: expected };
 }
 
+export function prepareAzureDevOpsPullfrogBranchCheckout(params: {
+  cwd: string;
+  ctx: AzureDevOpsGitContext;
+  permission: AzureDevOpsPushPermission;
+}): { branch: string; sha: string } {
+  if (params.permission !== "enabled") {
+    throw new Error(
+      "Azure DevOps Pullfrog branch checkout requires enabled push access"
+    );
+  }
+  const branch = validateAzureDevOpsPullfrogBranch(params.ctx.sourceBranch);
+  return prepareAzureDevOpsSourceCheckout({
+    ...params,
+    ctx: {
+      ...params.ctx,
+      sourceBranch: branch,
+    },
+  });
+}
+
 function assertNoInProgressGitOperation(cwd: string): void {
   for (const ref of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"]) {
     const result = spawnSync("git", ["rev-parse", "-q", "--verify", ref], {
@@ -402,6 +435,29 @@ function assertNoChangedLfsFiles(cwd: string, files: string[]): void {
       );
     }
   }
+}
+
+export async function commitAndPushAzureDevOpsPullfrogBranch(params: {
+  cwd: string;
+  ctx: AzureDevOpsGitContext;
+  permission: AzureDevOpsPushPermission;
+  message: string;
+  getLiveSourceCommitId: () => Promise<string | undefined>;
+  dryRun?: boolean | undefined;
+}): Promise<AzureDevOpsWriteResult> {
+  if (params.permission !== "enabled") {
+    throw new Error(
+      "Azure DevOps Pullfrog branch commit requires enabled push access"
+    );
+  }
+  const branch = validateAzureDevOpsPullfrogBranch(params.ctx.sourceBranch);
+  return await commitAndPushAzureDevOpsSource({
+    ...params,
+    ctx: {
+      ...params.ctx,
+      sourceBranch: branch,
+    },
+  });
 }
 
 export async function commitAndPushAzureDevOpsSource(params: {
