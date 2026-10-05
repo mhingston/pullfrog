@@ -227,11 +227,14 @@ function buildRepairOpenCodeConfig(model: string): string {
 }
 
 function gitWorkingTreeStatus(cwd: string): string {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of AZDO_AUTH_ENV) delete env[name];
+  env.GIT_TERMINAL_PROMPT = "0";
   const result = spawnSync("git", ["status", "--porcelain"], {
     cwd,
     encoding: "utf-8",
     maxBuffer: 4 * 1024 * 1024,
-    env: process.env,
+    env,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -1267,6 +1270,15 @@ async function runAutofixCi(params: {
     return;
   }
 
+  if (expectedTargetSha) {
+    const liveTarget = await repositoryClient.getBranchObjectId(ctx.targetBranch);
+    if (liveTarget !== expectedTargetSha) {
+      throw new Error(
+        "Azure DevOps CI autofix blocked: PR target changed since the failed build"
+      );
+    }
+  }
+
   const reservation = await repositoryClient.reserveRepairAttempt({
     pullRequestId: ctx.pullRequestId,
     kind: "ci",
@@ -1280,15 +1292,6 @@ async function runAutofixCi(params: {
         (reservation.attempt ? " (attempt " + reservation.attempt + ")" : "")
     );
     return;
-  }
-
-  if (expectedTargetSha) {
-    const liveTarget = await repositoryClient.getBranchObjectId(ctx.targetBranch);
-    if (liveTarget !== expectedTargetSha) {
-      throw new Error(
-        "Azure DevOps CI autofix blocked: PR target changed since the failed build"
-      );
-    }
   }
 
   prepareAzureDevOpsSourceCheckout({
