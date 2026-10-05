@@ -1,5 +1,6 @@
 import {
   azureWorkItemBuildBranch,
+  buildAzureWorkItemBuildPrompt,
   buildAzureWorkItemPrompt,
   deriveAzureWorkItemSearchTerms,
   parseAzureWorkItemModelResult,
@@ -209,6 +210,56 @@ describe("Azure work-item context and model output", () => {
     expect(prompt).toContain("TARGET REQUEST");
     expect(prompt).toContain("Tag mutation is disabled");
     expect(prompt).toContain("State mutation is disabled");
+  });
+
+  it("bounds oversized untrusted context before model use", () => {
+    const prompt = buildAzureWorkItemPrompt({
+      workItem: workItem({
+        description: "x".repeat(200_000),
+      }),
+      discussion: discussion([
+        {
+          id: 3,
+          body: "y".repeat(150_000),
+          author: { id: "actor-1" },
+        },
+      ]),
+      trigger: {
+        eventKey: "comment:3",
+        mode: "plan",
+        request: "@pullfrog plan this",
+        actorId: "actor-1",
+        actorLabel: "Mark",
+        commentId: 3,
+      },
+      candidates: [],
+      allowTags: false,
+      allowState: false,
+      allowedStates: new Set(),
+    });
+    expect(prompt).toContain("truncated");
+    expect(prompt.length).toBeLessThan(170_000);
+  });
+
+  it("keeps code-writing credentials and git ownership outside the model contract", () => {
+    const prompt = buildAzureWorkItemBuildPrompt({
+      workItem: workItem(),
+      discussion: discussion(),
+      trigger: {
+        eventKey: "comment:3",
+        mode: "build",
+        request: "@pullfrog build this",
+        actorId: "actor-1",
+        actorLabel: "Mark",
+        commentId: 3,
+      },
+      candidates: [],
+      targetBranch: "main",
+      targetSha: "0123456789abcdef0123456789abcdef01234567",
+    });
+    expect(prompt).toContain("Do not commit, push, change git remotes/config");
+    expect(prompt).toContain("Pullfrog owns branch creation, commit");
+    expect(prompt).toContain("no shell, git metadata").not;
   });
 
   it("rejects model attempts to mutate fields outside configured policy", () => {
