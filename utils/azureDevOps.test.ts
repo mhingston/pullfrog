@@ -477,6 +477,7 @@ describe("Azure DevOps safe PR mutations", () => {
 
   it("abandons a just-created PR if the source moves during creation", async () => {
     const sourceBranch = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(sourceBranch);
     let sourceReads = 0;
     let abandoned = false;
 
@@ -484,6 +485,18 @@ describe("Azure DevOps safe PR mutations", () => {
       const url = String(input);
       const method = init?.method ?? "GET";
 
+      if (
+        url.includes(
+          "/refs?filter=" + encodeURIComponent("heads/" + ownershipBranch)
+        )
+      ) {
+        return jsonResponse({
+          value: [{
+            name: "refs/heads/" + ownershipBranch,
+            objectId: targetCommitId,
+          }],
+        });
+      }
       if (url.includes("/refs?filter=heads%2Fpullfrog%2Fbranches%2Ffix-42")) {
         sourceReads += 1;
         return jsonResponse({
