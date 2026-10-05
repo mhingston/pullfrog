@@ -69,18 +69,20 @@ export function selectAzureCiRepairEligibility(params: {
       ? { eligible: true, class: "own" }
       : { eligible: false, reason: "own-pr-fixes-disabled" };
   }
+  if (!params.settings.reviewedPrs) {
+    return { eligible: false, reason: "reviewed-pr-fixes-disabled" };
+  }
   if (!params.reviewedAtSource) {
     return { eligible: false, reason: "not-pullfrog-reviewed" };
   }
-  return params.settings.reviewedPrs
-    ? { eligible: true, class: "reviewed" }
-    : { eligible: false, reason: "reviewed-pr-fixes-disabled" };
+  return { eligible: true, class: "reviewed" };
 }
 
 export function azureMergeStatusNeedsRepair(
   mergeStatus: string | undefined
 ): boolean {
-  return mergeStatus?.trim().toLowerCase() === "conflicts";
+  const normalized = mergeStatus?.trim().toLowerCase();
+  return normalized === "conflicts" || normalized === "failure";
 }
 
 export function buildAzureCiRepairPrompt(params: {
