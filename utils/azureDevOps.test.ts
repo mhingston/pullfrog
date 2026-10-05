@@ -384,6 +384,27 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects Azure PR titles over 400 characters before any API call", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+
+    await expect(
+      client.createPullRequestFromPullfrogBranch({
+        sourceBranch: "pullfrog/branches/fix-42",
+        sourceCommitId,
+        targetBranch: "main",
+        title: "x".repeat(401),
+        description: "",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("400 characters or fewer");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("never allows the repository default branch as a PR source", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
