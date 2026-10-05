@@ -61,6 +61,23 @@ export interface ReviewPublisher {
   publishReview(review: ReviewPublication): Promise<ReviewPublicationResult>;
 }
 
+export interface PullRequestDescriptionUpdate {
+  description: string;
+}
+
+export interface PullRequestDescriptionMutationResult extends PullRequestRef {
+  provider: PullRequestProviderId;
+  repository: RepositoryRef;
+  title: string;
+  description: string;
+}
+
+export interface PullRequestDescriptionMutator {
+  updatePullRequestDescription(
+    update: PullRequestDescriptionUpdate
+  ): Promise<PullRequestDescriptionMutationResult>;
+}
+
 export type PullRequestReviewProvider = PullRequestReader & ReviewPublisher;
 
 export type PullRequestEventKind =
