@@ -203,6 +203,68 @@ describe.each(descriptionMutationFixtures)(
   }
 );
 
+describe("PR description mutation response identity", () => {
+  it("rejects an Azure response for a different pull request", async () => {
+    const ctx: AzureDevOpsContext = {
+      collectionUri: "https://dev.azure.com/acme/",
+      project: "Platform",
+      repositoryId: "repo-guid",
+      repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+      defaultBranch: "main",
+      pullRequestId: 42,
+      sourceBranch: "feature/provider",
+      sourceCommitId: sourceSha,
+      targetBranch: "main",
+      authorization: "Bearer test",
+    };
+    const client: AzureDevOpsMutationApi = {
+      async updatePullRequestDescription(description) {
+        return {
+          pullRequestId: 43,
+          title: "wrong PR",
+          description,
+          sourceRefName: "refs/heads/feature/provider",
+          targetRefName: "refs/heads/main",
+        };
+      },
+    };
+
+    const mutator = new AzureDevOpsPullRequestDescriptionMutator(ctx, client);
+    await expect(
+      mutator.updatePullRequestDescription({ description: "updated description" })
+    ).rejects.toThrow("unexpected pull request 43");
+  });
+
+  it("rejects a GitHub response for a different pull request", async () => {
+    const api: GitHubMutationApi = {
+      pulls: {
+        async update(params) {
+          return {
+            data: {
+              id: 9002,
+              number: 43,
+              title: "wrong PR",
+              body: params.body,
+              head: { ref: "feature/provider", sha: sourceSha },
+              base: { ref: "main" },
+            },
+          };
+        },
+      },
+    };
+
+    const mutator = new GitHubPullRequestDescriptionMutator({
+      api,
+      owner: "acme",
+      repo: "widget",
+      pullNumber: 42,
+    });
+    await expect(
+      mutator.updatePullRequestDescription({ description: "updated description" })
+    ).rejects.toThrow("unexpected pull request #43");
+  });
+});
+
 describe.each(providerFixtures)("%s provider contract", (_name, fixture) => {
   it("normalizes PR identity and publishes against the reviewed source SHA", async () => {
     const { provider, published } = fixture();
