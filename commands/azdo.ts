@@ -84,6 +84,9 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("  branch-create create and checkout a Pullfrog-owned Azure branch (enabled only)");
   params.stream("  branch-commit commit and push changes to a Pullfrog-owned branch (enabled only)");
   params.stream("  create-pr    create an Azure Repos PR from a Pullfrog-owned branch (enabled only)");
+  params.stream("  autofix-ci   attempt a bounded repair of failing Azure Pipeline validation");
+  params.stream("  requeue-build requeue an exact failed PR validation build");
+  params.stream("  autofix-conflicts resolve supported Azure Repos merge conflicts");
   params.stream("");
   params.stream("review/follow-up options:");
   params.stream("  -m, --model <provider/model>  OpenCode model (defaults to PULLFROG_MODEL or azure/$AZURE_DEPLOYMENT)");
@@ -106,7 +109,11 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("      --expected <sha>          expected branch/base SHA for CAS validation");
   params.stream("      --title <text>            PR title (required for create-pr)");
   params.stream("      --description <text>      PR description (optional for create-pr)");
-  params.stream("      --dry-run                 validate commit/push without writing");
+  params.stream("      --build <id>              Azure Pipeline build id (defaults to BUILD_BUILDID/discovery)");
+  params.stream("      --max-attempts <n>        repair attempt budget, 1-10 (default/env: 3)");
+  params.stream("      --instructions <text>     additional repair instructions");
+  params.stream("      --requeue                 requeue exact failed build when CI repair makes no changes");
+  params.stream("      --dry-run                 validate/print repair context without remote writes");
   params.stream("");
   params.stream("  -h, --help                    show help");
 }
@@ -1541,6 +1548,10 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       "--expected": String,
       "--title": String,
       "--description": String,
+      "--build": String,
+      "--max-attempts": String,
+      "--instructions": String,
+      "--requeue": Boolean,
       "--pull-request": String,
       "--thread": String,
       "--comment": String,
@@ -1640,6 +1651,38 @@ export async function runCli(params: AzdoCliParams): Promise<void> {
       expected: parsed["--expected"],
       title: parsed["--title"],
       description: parsed["--description"],
+    });
+    return;
+  }
+
+  if (subcommand === "autofix-ci") {
+    await runAutofixCi({
+      model: parsed["--model"],
+      push: parsed["--push"],
+      build: parsed["--build"],
+      maxAttempts: parsed["--max-attempts"],
+      instructions: parsed["--instructions"],
+      requeue: parsed["--requeue"] === true,
+      dryRun: parsed["--dry-run"] === true,
+    });
+    return;
+  }
+
+  if (subcommand === "requeue-build") {
+    await runRequeueBuild({
+      build: parsed["--build"],
+    });
+    return;
+  }
+
+  if (subcommand === "autofix-conflicts") {
+    await runAutofixConflicts({
+      model: parsed["--model"],
+      push: parsed["--push"],
+      pullRequest: parsed["--pull-request"],
+      maxAttempts: parsed["--max-attempts"],
+      instructions: parsed["--instructions"],
+      dryRun: parsed["--dry-run"] === true,
     });
     return;
   }
