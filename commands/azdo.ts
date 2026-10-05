@@ -982,7 +982,13 @@ async function runPollFollowUps(params: {
   const max = parseAzurePollMax(params.max);
 
   const repositoryClient = new AzureDevOpsRepositoryClient(repository);
-  const pullRequests = await repositoryClient.listActivePullRequests({ max: 500 });
+  const scannedPullRequests = await repositoryClient.listActivePullRequests({ max: 501 });
+  if (scannedPullRequests.length > 500) {
+    throw new Error(
+      "Azure DevOps follow-up polling blocked: active PR scan exceeded 500 entries"
+    );
+  }
+  const pullRequests = scannedPullRequests.slice(0, 500);
   const candidates: AzurePollingCandidate[] = [];
 
   for (const pullRequest of pullRequests) {
@@ -1992,12 +1998,12 @@ async function runAutofixCi(params: {
     ctx.sourceBranch.startsWith("pullfrog/branches/") &&
     (await repositoryClient.hasPullfrogBranchOwnership(ctx.sourceBranch));
   let reviewedAtSource = false;
-  if (!pullfrogOwned && settings.reviewedPrs) {
+  if (settings.ownPrs || settings.reviewedPrs) {
     const trustedReviewAuthorId =
       process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID?.trim();
     if (!trustedReviewAuthorId) {
       throw new Error(
-        "PULLFROG_AZDO_REVIEW_IDENTITY_ID is required when reviewed-PR Azure CI autofix is enabled"
+        "PULLFROG_AZDO_REVIEW_IDENTITY_ID is required when Azure CI autofix is enabled"
       );
     }
     reviewedAtSource = await client.hasPullfrogReviewForSource(
@@ -2065,6 +2071,14 @@ async function runAutofixCi(params: {
     }
   }
 
+  // Deterministic local preflight failures (for example a dirty checkout)
+  // must not consume a durable repair-attempt slot.
+  prepareAzureDevOpsSourceCheckout({
+    cwd: process.cwd(),
+    ctx,
+    permission,
+  });
+
   const reservation = await repositoryClient.reserveRepairAttempt({
     pullRequestId: ctx.pullRequestId,
     kind: "ci",
@@ -2079,12 +2093,6 @@ async function runAutofixCi(params: {
     );
     return;
   }
-
-  prepareAzureDevOpsSourceCheckout({
-    cwd: process.cwd(),
-    ctx,
-    permission,
-  });
 
   const prompt = buildAzureCiRepairPrompt({
     pullRequestId: ctx.pullRequestId,
@@ -2108,6 +2116,17 @@ async function runAutofixCi(params: {
     if (!params.requeue) {
       console.log(
         "Azure DevOps CI repair produced no working-tree changes; no push performed"
+      );
+      return;
+    }
+
+    const originalResult = failure.build.result?.trim().toLowerCase();
+    if (
+      originalResult !== "failed" &&
+      originalResult !== "partiallysucceeded"
+    ) {
+      console.log(
+        "Azure DevOps CI repair produced no changes, but the current build has not completed; no requeue performed"
       );
       return;
     }
