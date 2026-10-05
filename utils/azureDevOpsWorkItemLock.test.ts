@@ -26,7 +26,7 @@ describe("Azure work-item coordination locks", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses immutable work-item/revision/comment identity in the reserved lock namespace", () => {
+  it("uses immutable work-item/comment event identity in the reserved lock namespace", () => {
     const client = new AzureDevOpsRepositoryClient(ctx);
     expect(
       client.workItemLockRef({
