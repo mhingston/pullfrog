@@ -1112,6 +1112,422 @@ async function runCreatePr(params: {
   );
 }
 
+function azureRepositorySecrets(
+  authorization: string
+): string[] {
+  const values = AZDO_AUTH_ENV
+    .map((name) => process.env[name]?.trim())
+    .filter((value): value is string => Boolean(value));
+  const authValue = authorization.replace(/^(?:Bearer|Basic)\s+/i, "").trim();
+  if (authValue) values.push(authValue);
+  return [...new Set(values)];
+}
+
+async function resolveAzureCiBuildId(params: {
+  build: string | undefined;
+  buildClient: AzureDevOpsBuildClient;
+  pullRequestId: number;
+  sourceSha: string;
+}): Promise<number | undefined> {
+  if (params.build?.trim()) {
+    return requireCliPositiveInteger("--build", params.build);
+  }
+
+  const currentBuild = process.env.BUILD_BUILDID?.trim();
+  if (currentBuild) {
+    return requireCliPositiveInteger("BUILD_BUILDID", currentBuild);
+  }
+
+  const builds = await params.buildClient.listPullRequestBuilds({
+    pullRequestId: params.pullRequestId,
+    sourceSha: params.sourceSha,
+    max: 25,
+  });
+  return builds.find((build) => {
+    const result = build.result?.trim().toLowerCase();
+    return result === "failed" || result === "partiallysucceeded";
+  })?.id;
+}
+
+async function runAutofixCi(params: {
+  model: string | undefined;
+  push: string | undefined;
+  build: string | undefined;
+  maxAttempts: string | undefined;
+  instructions: string | undefined;
+  requeue: boolean;
+  dryRun: boolean;
+}): Promise<void> {
+  const ctx = resolveAzureDevOpsContext();
+  const permission = parseAzureDevOpsPushPermission(
+    params.push ?? process.env.PULLFROG_PUSH
+  );
+  if (permission === "disabled") {
+    throw new Error("Azure DevOps CI autofix requires restricted or enabled push access");
+  }
+
+  const sourceSha = ctx.sourceCommitId.toLowerCase();
+  const client = new AzureDevOpsClient(ctx);
+  const repositoryClient = new AzureDevOpsRepositoryClient(ctx);
+  const buildClient = new AzureDevOpsBuildClient(ctx);
+  const pullRequest = await client.getPullRequest();
+
+  const liveSource = await client.getLiveSourceCommitId();
+  if (!liveSource || liveSource !== sourceSha) {
+    throw new Error(
+      "Azure DevOps CI autofix blocked: PR source changed before repair"
+    );
+  }
+
+  const settings = resolveAzureCiAutofixSettings();
+  const maxAttempts =
+    params.maxAttempts?.trim() !== undefined && params.maxAttempts?.trim()
+      ? parseAzureRepairMaxAttempts(params.maxAttempts)
+      : settings.maxAttempts;
+  const pullfrogOwned =
+    ctx.sourceBranch.startsWith("pullfrog/branches/") &&
+    (await repositoryClient.hasPullfrogBranchOwnership(ctx.sourceBranch));
+  const reviewedAtSource = pullfrogOwned
+    ? false
+    : await client.hasPullfrogReviewForSource(sourceSha);
+  const eligibility = selectAzureCiRepairEligibility({
+    pullfrogOwned,
+    reviewedAtSource,
+    settings,
+  });
+  if (!eligibility.eligible) {
+    console.log(
+      "skipping Azure DevOps CI autofix: " + eligibility.reason
+    );
+    return;
+  }
+
+  const buildId = await resolveAzureCiBuildId({
+    build: params.build,
+    buildClient,
+    pullRequestId: ctx.pullRequestId,
+    sourceSha,
+  });
+  if (!buildId) {
+    console.log(
+      "skipping Azure DevOps CI autofix: no failed build found for the current PR/source"
+    );
+    return;
+  }
+
+  const failure = await buildClient.collectFailureContext({
+    buildId,
+    pullRequestId: ctx.pullRequestId,
+    sourceSha,
+    secrets: azureRepositorySecrets(ctx.authorization),
+  });
+
+  if (params.dryRun) {
+    console.log(
+      buildAzureCiRepairPrompt({
+        pullRequestId: ctx.pullRequestId,
+        sourceBranch: ctx.sourceBranch,
+        targetBranch: ctx.targetBranch,
+        sourceSha,
+        attempt: 1,
+        failure,
+        additionalInstructions:
+          params.instructions ??
+          process.env.PULLFROG_AZDO_FIX_CI_INSTRUCTIONS,
+      })
+    );
+    return;
+  }
+
+  const reservation = await repositoryClient.reserveRepairAttempt({
+    pullRequestId: ctx.pullRequestId,
+    kind: "ci",
+    sourceCommitId: sourceSha,
+    maxAttempts,
+  });
+  if (!reservation.acquired) {
+    console.log(
+      "skipping Azure DevOps CI autofix: " +
+        reservation.reason +
+        (reservation.attempt ? " (attempt " + reservation.attempt + ")" : "")
+    );
+    return;
+  }
+
+  prepareAzureDevOpsSourceCheckout({
+    cwd: process.cwd(),
+    ctx,
+    permission,
+  });
+
+  const prompt = buildAzureCiRepairPrompt({
+    pullRequestId: ctx.pullRequestId,
+    sourceBranch: ctx.sourceBranch,
+    targetBranch: ctx.targetBranch,
+    sourceSha,
+    attempt: reservation.attempt,
+    failure,
+    additionalInstructions:
+      params.instructions ??
+      process.env.PULLFROG_AZDO_FIX_CI_INSTRUCTIONS,
+  });
+  const modelOutput = await runAzureRepairModel({
+    model: params.model,
+    prompt,
+    cwd: process.cwd(),
+  });
+  if (modelOutput) console.log(modelOutput);
+
+  if (!gitWorkingTreeStatus(process.cwd())) {
+    if (!params.requeue) {
+      console.log(
+        "Azure DevOps CI repair produced no working-tree changes; no push performed"
+      );
+      return;
+    }
+
+    const liveBeforeRequeue = await client.getLiveSourceCommitId();
+    if (!liveBeforeRequeue || liveBeforeRequeue !== sourceSha) {
+      throw new Error(
+        "Azure DevOps CI requeue blocked: PR source changed after repair analysis"
+      );
+    }
+    const queued = await buildClient.requeueBuild({
+      buildId,
+      pullRequestId: ctx.pullRequestId,
+      sourceSha,
+    });
+    console.log(
+      "requeued Azure Pipeline build " +
+        queued.id +
+        " for unchanged PR source " +
+        sourceSha.slice(0, 12)
+    );
+    return;
+  }
+
+  const result = await commitAndPushAzureDevOpsSource({
+    cwd: process.cwd(),
+    ctx,
+    permission,
+    message:
+      "fix: repair Azure CI (attempt " + reservation.attempt + ")",
+    getLiveSourceCommitId: () => client.getLiveSourceCommitId(),
+  });
+
+  console.log(
+    "Azure DevOps CI autofix pushed " +
+      result.pushedSha.slice(0, 12) +
+      " to " +
+      result.branch +
+      " from build " +
+      buildId +
+      " (attempt " +
+      reservation.attempt +
+      ")"
+  );
+}
+
+async function runRequeueBuild(params: {
+  build: string | undefined;
+}): Promise<void> {
+  const ctx = resolveAzureDevOpsContext();
+  const buildId = requireCliPositiveInteger(
+    "--build",
+    params.build ?? process.env.BUILD_BUILDID
+  );
+  const sourceSha = ctx.sourceCommitId.toLowerCase();
+  const client = new AzureDevOpsClient(ctx);
+  const buildClient = new AzureDevOpsBuildClient(ctx);
+
+  const liveSource = await client.getLiveSourceCommitId();
+  if (!liveSource || liveSource !== sourceSha) {
+    throw new Error(
+      "Azure DevOps build requeue blocked: PR source changed"
+    );
+  }
+
+  const queued = await buildClient.requeueBuild({
+    buildId,
+    pullRequestId: ctx.pullRequestId,
+    sourceSha,
+  });
+  console.log(
+    "queued Azure Pipeline build " +
+      queued.id +
+      " from failed build " +
+      buildId
+  );
+}
+
+async function runAutofixConflicts(params: {
+  model: string | undefined;
+  push: string | undefined;
+  pullRequest: string | undefined;
+  maxAttempts: string | undefined;
+  instructions: string | undefined;
+  dryRun: boolean;
+}): Promise<void> {
+  const repository = resolveAzureDevOpsRepositoryContext();
+  const pullRequestId = requireCliPositiveInteger(
+    "--pull-request",
+    params.pullRequest ??
+      process.env.SYSTEM_PULLREQUEST_PULLREQUESTID
+  );
+  const permission = parseAzureDevOpsPushPermission(
+    params.push ?? process.env.PULLFROG_PUSH
+  );
+  if (permission === "disabled") {
+    throw new Error(
+      "Azure DevOps conflict autofix requires restricted or enabled push access"
+    );
+  }
+
+  const client = new AzureDevOpsClient({
+    ...repository,
+    pullRequestId,
+  });
+  const repositoryClient = new AzureDevOpsRepositoryClient(repository);
+  const pullRequest = await client.getPullRequest();
+
+  if (!azureMergeStatusNeedsRepair(pullRequest.mergeStatus)) {
+    console.log(
+      "skipping Azure DevOps conflict autofix: mergeStatus=" +
+        (pullRequest.mergeStatus ?? "(unset)")
+    );
+    return;
+  }
+
+  const sourceBranch = stripRefsHeads(pullRequest.sourceRefName);
+  const targetBranch = stripRefsHeads(pullRequest.targetRefName);
+  const sourceSha =
+    pullRequest.lastMergeSourceCommit?.commitId?.trim().toLowerCase();
+  if (!sourceSha || !/^[0-9a-f]{40}$/.test(sourceSha)) {
+    throw new Error(
+      "Azure DevOps conflict autofix requires a valid live PR source commit"
+    );
+  }
+
+  const targetSha =
+    pullRequest.lastMergeTargetCommit?.commitId?.trim().toLowerCase() ??
+    (await repositoryClient.getBranchObjectId(targetBranch));
+  if (!targetSha || !/^[0-9a-f]{40}$/.test(targetSha)) {
+    throw new Error(
+      "Azure DevOps conflict autofix requires a valid live target commit"
+    );
+  }
+
+  const maxAttempts = parseAzureRepairMaxAttempts(
+    params.maxAttempts ??
+      process.env.PULLFROG_AZDO_MAX_REPAIR_ATTEMPTS
+  );
+  let attempt = 1;
+  if (!params.dryRun) {
+    const reservation = await repositoryClient.reserveRepairAttempt({
+      pullRequestId,
+      kind: "conflict",
+      sourceCommitId: sourceSha,
+      maxAttempts,
+    });
+    if (!reservation.acquired) {
+      console.log(
+        "skipping Azure DevOps conflict autofix: " +
+          reservation.reason +
+          (reservation.attempt ? " (attempt " + reservation.attempt + ")" : "")
+      );
+      return;
+    }
+    attempt = reservation.attempt;
+  }
+
+  const gitContext = {
+    ...repository,
+    sourceBranch,
+    sourceCommitId: sourceSha,
+    targetBranch,
+  };
+  prepareAzureDevOpsSourceCheckout({
+    cwd: process.cwd(),
+    ctx: gitContext,
+    permission,
+  });
+
+  let mergePrepared = false;
+  try {
+    const prepared = await prepareAzureDevOpsMergeResolution({
+      cwd: process.cwd(),
+      ctx: gitContext,
+      permission,
+      getLiveSourceCommitId: () => client.getLiveSourceCommitId(),
+      getLiveTargetCommitId: () =>
+        repositoryClient.getBranchObjectId(targetBranch),
+    });
+    mergePrepared = true;
+
+    const prompt = buildAzureConflictRepairPrompt({
+      pullRequestId,
+      sourceBranch,
+      targetBranch,
+      sourceSha,
+      targetSha: prepared.targetSha,
+      attempt,
+      conflictedFiles: prepared.conflictedFiles,
+      additionalInstructions:
+        params.instructions ??
+        process.env.PULLFROG_AZDO_CONFLICT_INSTRUCTIONS,
+    });
+
+    if (params.dryRun) {
+      console.log(prompt);
+      return;
+    }
+
+    if (prepared.conflictedFiles.length > 0) {
+      const modelOutput = await runAzureRepairModel({
+        model: params.model,
+        prompt,
+        cwd: process.cwd(),
+      });
+      if (modelOutput) console.log(modelOutput);
+    }
+
+    const result = await commitAndPushAzureDevOpsMergeResolution({
+      cwd: process.cwd(),
+      ctx: gitContext,
+      permission,
+      message:
+        "fix: resolve Azure merge conflicts (attempt " + attempt + ")",
+      targetSha: prepared.targetSha,
+      conflictedFiles: prepared.conflictedFiles,
+      getLiveSourceCommitId: () => client.getLiveSourceCommitId(),
+      getLiveTargetCommitId: () =>
+        repositoryClient.getBranchObjectId(targetBranch),
+    });
+    mergePrepared = false;
+
+    console.log(
+      "Azure DevOps conflict autofix pushed merge commit " +
+        result.pushedSha.slice(0, 12) +
+        " to " +
+        result.branch +
+        " (attempt " +
+        attempt +
+        ")"
+    );
+  } finally {
+    if (mergePrepared) {
+      try {
+        abortAzureDevOpsMergeResolution(process.cwd());
+      } catch (error) {
+        console.error(
+          "failed to abort Azure merge repair working tree: " +
+            (error instanceof Error ? error.message : String(error))
+        );
+      }
+    }
+  }
+}
+
 export async function runCli(params: AzdoCliParams): Promise<void> {
   const parsed = arg(
     {
