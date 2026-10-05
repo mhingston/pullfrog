@@ -685,6 +685,11 @@ export class AzureDevOpsRepositoryClient {
     if (!title) {
       throw new Error("Azure DevOps PR title must not be empty");
     }
+    if (title.length > 400) {
+      throw new Error(
+        "Azure DevOps PR title must be 400 characters or fewer"
+      );
+    }
     if (params.description.length > 4000) {
       throw new Error(
         "Azure DevOps PR description must be 4000 characters or fewer"
@@ -739,25 +744,8 @@ export class AzureDevOpsRepositoryClient {
     if (!Number.isInteger(created.pullRequestId) || created.pullRequestId <= 0) {
       throw new Error("Azure DevOps PR creation returned an invalid pull request id");
     }
-    if (
-      created.repository?.id &&
-      created.repository.id.toLowerCase() !== this.#ctx.repositoryId.toLowerCase()
-    ) {
-      throw new Error(
-        "Azure DevOps PR creation returned an unexpected repository id"
-      );
-    }
-    if (
-      created.sourceRefName !== "refs/heads/" + sourceBranch ||
-      created.targetRefName !== "refs/heads/" + targetBranch
-    ) {
-      throw new Error(
-        "Azure DevOps PR creation returned unexpected source/target refs"
-      );
-    }
 
-    const liveAfter = await this.getBranchObjectId(sourceBranch);
-    if (!liveAfter || liveAfter !== sourceCommitId) {
+    const abandonCreated = async (): Promise<void> => {
       await this.#request<AzureDevOpsPullRequest>(
         "/pullrequests/" + created.pullRequestId + "?api-version=7.1",
         {
@@ -765,14 +753,57 @@ export class AzureDevOpsRepositoryClient {
           body: JSON.stringify({ status: "abandoned" }),
         }
       );
+    };
+
+    try {
+      if (
+        created.repository?.id &&
+        created.repository.id.toLowerCase() !== this.#ctx.repositoryId.toLowerCase()
+      ) {
+        throw new Error(
+          "Azure DevOps PR creation returned an unexpected repository id"
+        );
+      }
+      if (
+        created.sourceRefName !== "refs/heads/" + sourceBranch ||
+        created.targetRefName !== "refs/heads/" + targetBranch
+      ) {
+        throw new Error(
+          "Azure DevOps PR creation returned unexpected source/target refs"
+        );
+      }
+
+      const liveAfter = await this.getBranchObjectId(sourceBranch);
+      if (!liveAfter || liveAfter !== sourceCommitId) {
+        throw new Error(
+          "Azure DevOps PR creation raced with source movement"
+        );
+      }
+
+      return created;
+    } catch (error) {
+      try {
+        await abandonCreated();
+      } catch (abandonError) {
+        throw new Error(
+          (error instanceof Error ? error.message : String(error)) +
+            "; additionally failed to abandon created PR #" +
+            created.pullRequestId +
+            ": " +
+            (abandonError instanceof Error
+              ? abandonError.message
+              : String(abandonError)),
+          { cause: error }
+        );
+      }
       throw new Error(
-        "Azure DevOps PR creation raced with source movement; created PR #" +
+        (error instanceof Error ? error.message : String(error)) +
+          "; created PR #" +
           created.pullRequestId +
-          " was abandoned"
+          " was abandoned",
+        { cause: error }
       );
     }
-
-    return created;
   }
 
   async listActivePullRequests(params?: {
@@ -972,7 +1003,7 @@ export class AzureDevOpsClient {
 
   async updatePullRequestDescription(
     description: string,
-    expectedSourceCommitId?: string
+    expectedSourceCommitId: string
   ): Promise<AzureDevOpsPullRequest> {
     if (description.length > 4000) {
       throw new Error(
@@ -980,27 +1011,25 @@ export class AzureDevOpsClient {
       );
     }
 
-    if (expectedSourceCommitId !== undefined) {
-      const expected = expectedSourceCommitId.trim().toLowerCase();
-      if (!/^[0-9a-f]{40}$/.test(expected)) {
-        throw new Error(
-          "Azure DevOps PR mutation requires a valid expected source commit"
-        );
-      }
-      const live = await this.getLiveSourceCommitId();
-      if (!live) {
-        throw new Error(
-          "Azure DevOps PR mutation blocked: unable to verify live source commit"
-        );
-      }
-      if (live !== expected) {
-        throw new Error(
-          "Azure DevOps PR mutation blocked: source advanced from " +
-            expected.slice(0, 12) +
-            " to " +
-            live.slice(0, 12)
-        );
-      }
+    const expected = expectedSourceCommitId.trim().toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(expected)) {
+      throw new Error(
+        "Azure DevOps PR mutation requires a valid expected source commit"
+      );
+    }
+    const live = await this.getLiveSourceCommitId();
+    if (!live) {
+      throw new Error(
+        "Azure DevOps PR mutation blocked: unable to verify live source commit"
+      );
+    }
+    if (live !== expected) {
+      throw new Error(
+        "Azure DevOps PR mutation blocked: source advanced from " +
+          expected.slice(0, 12) +
+          " to " +
+          live.slice(0, 12)
+      );
     }
 
     return await this.#request<AzureDevOpsPullRequest>("?api-version=7.1", {
