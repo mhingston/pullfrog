@@ -591,6 +591,15 @@ export class AzureDevOpsClient {
     return await this.#request<AzureDevOpsPullRequest>("?api-version=7.1");
   }
 
+  async updatePullRequestDescription(
+    description: string
+  ): Promise<AzureDevOpsPullRequest> {
+    return await this.#request<AzureDevOpsPullRequest>("?api-version=7.1", {
+      method: "PATCH",
+      body: JSON.stringify({ description }),
+    });
+  }
+
   async getThread(threadId: number): Promise<AzureDevOpsThread> {
     if (!Number.isInteger(threadId) || threadId <= 0) {
       throw new Error("Azure DevOps thread id must be a positive integer");
