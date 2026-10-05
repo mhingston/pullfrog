@@ -169,7 +169,7 @@ export function buildMatchesPullRequestSource(params: {
   }
 
   const buildPr = azureBuildPullRequestNumber(params.build);
-  if (buildPr !== undefined && buildPr !== params.pullRequestId) return false;
+  if (buildPr !== params.pullRequestId) return false;
 
   const triggerSha = azureBuildPullRequestSourceSha(params.build);
   const headMatches =
@@ -447,13 +447,15 @@ export class AzureDevOpsBuildClient {
     }
 
     const timeline = await this.getTimeline(params.buildId);
-    const failed = timeline
-      .filter(
-        (record) =>
-          record.result?.toLowerCase() === "failed" &&
+    const diagnostic = timeline
+      .filter((record) => {
+        const result = record.result?.trim().toLowerCase();
+        return (
+          (result === "failed" || result === "succeededwithissues") &&
           Number.isInteger(record.log?.id) &&
           (record.log?.id ?? 0) > 0
-      )
+        );
+      })
       .sort((left, right) => {
         const order = (left.order ?? 0) - (right.order ?? 0);
         return order !== 0 ? order : left.id.localeCompare(right.id);
@@ -464,7 +466,7 @@ export class AzureDevOpsBuildClient {
     let totalChars = 0;
     let truncated = false;
 
-    for (const record of failed) {
+    for (const record of diagnostic) {
       const logId = record.log!.id!;
       if (seenLogs.has(logId)) continue;
       seenLogs.add(logId);
@@ -507,7 +509,7 @@ export class AzureDevOpsBuildClient {
 
     if (failedLogs.length === 0) {
       throw new Error(
-        "Azure DevOps build has no failed timeline records with readable logs"
+        "Azure DevOps build has no failed/succeeded-with-issues timeline records with readable logs"
       );
     }
 
@@ -521,15 +523,6 @@ export class AzureDevOpsBuildClient {
     mergeSha?: string | undefined;
   }): Promise<AzureDevOpsBuild> {
     const build = await this.getBuild(params.buildId);
-    const buildResult = build.result?.trim().toLowerCase();
-    if (
-      buildResult !== "failed" &&
-      buildResult !== "partiallysucceeded"
-    ) {
-      throw new Error(
-        "refusing to requeue Azure build that is not failed/partially succeeded"
-      );
-    }
     if (
       !buildMatchesPullRequestSource({
         build,
