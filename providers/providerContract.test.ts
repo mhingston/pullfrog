@@ -1,14 +1,21 @@
 import {
+  AzureDevOpsPullRequestDescriptionMutator,
   AzureDevOpsPullRequestProvider,
   azureDevOpsValidationEvent,
+  type AzureDevOpsMutationApi,
   type AzureDevOpsReviewApi,
 } from "./azureDevOps.ts";
 import {
+  GitHubPullRequestDescriptionMutator,
   GitHubPullRequestProvider,
+  type GitHubMutationApi,
   type GitHubReviewApi,
 } from "./github.ts";
 import { runPullRequestReview } from "./review.ts";
-import type { PullRequestReviewProvider } from "./types.ts";
+import type {
+  PullRequestDescriptionMutator,
+  PullRequestReviewProvider,
+} from "./types.ts";
 import type { AzureDevOpsContext } from "../utils/azureDevOps.ts";
 
 const sourceSha = "0123456789abcdef0123456789abcdef01234567";
@@ -98,6 +105,103 @@ const providerFixtures: Array<[
   ["Azure DevOps", azureFixture],
   ["GitHub", githubFixture],
 ];
+
+type DescriptionMutationFixture = {
+  mutator: PullRequestDescriptionMutator;
+  updatedDescriptions: string[];
+};
+
+function azureMutationFixture(): DescriptionMutationFixture {
+  const ctx: AzureDevOpsContext = {
+    collectionUri: "https://dev.azure.com/acme/",
+    project: "Platform",
+    repositoryId: "repo-guid",
+    repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+    defaultBranch: "main",
+    pullRequestId: 42,
+    sourceBranch: "feature/provider",
+    sourceCommitId: sourceSha,
+    targetBranch: "main",
+    authorization: "Bearer test",
+  };
+  const updatedDescriptions: string[] = [];
+  const client: AzureDevOpsMutationApi = {
+    async updatePullRequestDescription(description) {
+      updatedDescriptions.push(description);
+      return {
+        pullRequestId: 42,
+        title: "provider boundary",
+        description,
+        sourceRefName: "refs/heads/feature/provider",
+        targetRefName: "refs/heads/main",
+      };
+    },
+  };
+  return {
+    mutator: new AzureDevOpsPullRequestDescriptionMutator(ctx, client),
+    updatedDescriptions,
+  };
+}
+
+function githubMutationFixture(): DescriptionMutationFixture {
+  const updatedDescriptions: string[] = [];
+  const api: GitHubMutationApi = {
+    pulls: {
+      async update(params) {
+        updatedDescriptions.push(params.body);
+        return {
+          data: {
+            id: 9001,
+            number: 42,
+            title: "provider boundary",
+            body: params.body,
+            head: { ref: "feature/provider", sha: sourceSha },
+            base: { ref: "main" },
+          },
+        };
+      },
+    },
+  };
+  return {
+    mutator: new GitHubPullRequestDescriptionMutator({
+      api,
+      owner: "acme",
+      repo: "widget",
+      pullNumber: 42,
+    }),
+    updatedDescriptions,
+  };
+}
+
+const descriptionMutationFixtures: Array<
+  [string, () => DescriptionMutationFixture, string, string]
+> = [
+  ["Azure DevOps", azureMutationFixture, "azure-devops", "repo-guid"],
+  ["GitHub", githubMutationFixture, "github", "acme/widget"],
+];
+
+describe.each(descriptionMutationFixtures)(
+  "%s PR description mutation contract",
+  (_name, fixture, provider, repositoryId) => {
+    it("updates one provider-neutral metadata field and normalizes the result", async () => {
+      const { mutator, updatedDescriptions } = fixture();
+
+      const result = await mutator.updatePullRequestDescription({
+        description: "updated description",
+      });
+
+      expect(updatedDescriptions).toEqual(["updated description"]);
+      expect(result).toEqual({
+        provider,
+        repository: { id: repositoryId },
+        id: provider === "github" ? "9001" : "42",
+        number: 42,
+        title: "provider boundary",
+        description: "updated description",
+      });
+    });
+  }
+);
 
 describe.each(providerFixtures)("%s provider contract", (_name, fixture) => {
   it("normalizes PR identity and publishes against the reviewed source SHA", async () => {
