@@ -602,6 +602,12 @@ export class AzureDevOpsClient {
     if (Number.isNaN(now.getTime())) {
       throw new Error("Azure DevOps follow-up reservation clock is invalid");
     }
+    const settleMs = params.settleMs ?? 250;
+    if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 5_000) {
+      throw new Error(
+        "Azure DevOps follow-up reservation settle time must be between 0 and 5000 ms"
+      );
+    }
 
     const before = await this.getThread(params.threadId);
     const trigger = (before.comments ?? []).find(
@@ -680,12 +686,6 @@ export class AzureDevOpsClient {
       }
     );
 
-    const settleMs = params.settleMs ?? 250;
-    if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 5_000) {
-      throw new Error(
-        "Azure DevOps follow-up reservation settle time must be between 0 and 5000 ms"
-      );
-    }
     if (settleMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, settleMs));
     }
