@@ -941,6 +941,7 @@ async function runBranchCommit(params: {
     message,
     dryRun: params.dryRun,
     getLiveSourceCommitId: () => client.getBranchObjectId(branch),
+    verifyOwnership: (candidate) => client.hasPullfrogBranchOwnership(candidate),
   });
 
   console.log(
