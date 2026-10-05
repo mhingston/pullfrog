@@ -273,7 +273,7 @@ The trigger is intentionally explicit:
 - `--resolve` closes the originating thread after the reply when that is explicitly requested by the queued run;
 - `--dry-run` prints the answer without posting it.
 
-Each reply carries a hidden marker keyed by **thread ID + triggering comment ID**. A retry first checks for that marker and reuses the existing comment. If two runs race and both create a reply, Pullfrog re-reads the thread, keeps the lowest matching comment ID, and deletes the later duplicate.
+Each reply carries a hidden marker keyed by **thread ID + triggering comment ID**. Before any non-dry-run model execution, Pullfrog also creates a short-lived hidden reservation for that same request. Concurrent workers re-read the thread after reservation creation and deterministically elect the lowest reservation comment ID; losing workers stop before invoking the model. A retry still checks the final reply marker first and reuses the existing response.
 
 This slice uses **pipeline queue permission as the authorization boundary**: writing `@pullfrog` in a PR does not itself authorize a run. Only users allowed to queue this follow-up pipeline (and, where applicable, set its queue-time parameters) can cause Pullfrog to process a selected comment. Restrict those Azure Pipeline permissions to the people/groups you intend to authorize. The build-service identity still needs repository permission to read and write PR comment threads.
 
@@ -328,9 +328,11 @@ Eligible requests use the same semantics as the manual command: explicit `@pullf
 
 Azure YAML schedules use UTC cron expressions. `always: true` is important here because comments can change without the repository source changing.
 
-**Concurrency note:** this slice provides idempotent reply publication, but it does not yet reserve an event before model execution across separate overlapping workers. Two simultaneous scheduled runs can therefore both spend model work on the same newly discovered comment even though reply convergence prevents duplicate final comments. Use an interval/concurrency policy that avoids overlapping poll jobs until the distributed run-reservation slice lands.
+Follow-up execution is now distributed-run convergent as well as publication-convergent. Before the diff/model path starts, the worker posts a hidden reservation comment scoped to **thread ID + trigger comment ID** and tagged with a unique claim ID. Azure's comment-create API does not expose a conditional create, so workers wait briefly, re-read the thread, and elect the lowest reservation comment ID as the single winner. Losing workers delete their own reservation and exit before model execution.
 
-The immutable actor allowlist is the authorization boundary for **automatic** polling. The manually queued `follow-up` command retains its separate pipeline-queue authorization model.
+Reservations use Azure's server-supplied `publishedDate` and a 30-minute lease. A crashed worker therefore cannot lock a request permanently: after the lease expires, a later invocation removes the stale reservation and retries. Missing or malformed reservation timestamps fail closed rather than allowing duplicate model work. Reservation cleanup is best effort after success/failure; a leaked reservation self-heals via the lease, while an already-published final reply marker always wins over a reservation.
+
+The immutable actor allowlist is the authorization boundary for **automatic** polling. The manually queued `follow-up` command retains its separate pipeline-queue authorization model, but both transports share the same reservation path so a manual run and scheduled poll cannot intentionally process the same request at the same time. `--dry-run` remains write-free and therefore does not create a reservation.
 
 ### Safe PR-source writes
 
