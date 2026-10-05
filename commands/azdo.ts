@@ -77,7 +77,7 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("      --resolve                 resolve the thread after posting the reply");
   params.stream("");
   params.stream("poll-follow-ups options:");
-  params.stream("      --after <iso-date>        rollout cutoff (or PULLFROG_AZDO_POLL_AFTER)");
+  params.stream("      --after <rfc3339>         rollout cutoff with explicit Z/offset (or PULLFROG_AZDO_POLL_AFTER)");
   params.stream("      --allowed-actor-ids <csv> immutable Azure identity IDs (or PULLFROG_AZDO_ALLOWED_ACTOR_IDS)");
   params.stream("      --max <n>                 max model-backed follow-ups per poll, 1-50 (default 10)");
   params.stream("");
