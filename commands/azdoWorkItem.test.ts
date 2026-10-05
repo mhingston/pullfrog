@@ -334,9 +334,39 @@ describe("Azure work-item context and model output", () => {
 });
 
 describe("Azure work-item polling", () => {
+  it("inherits the configured mode for plain @pullfrog polling comments", () => {
+    const candidates = selectAzureWorkItemPollingCandidates({
+      workItem: workItem({
+        createdAt: "2026-10-05T07:00:00Z",
+      }),
+      configuredMode: "plan",
+      discussion: discussion([
+        {
+          id: 11,
+          body: "@pullfrog please take a look",
+          author: { id: "ACTOR-1" },
+          createdAt: "2026-10-05T08:05:00Z",
+        },
+      ]),
+      allowedActorIds: new Set(["actor-1"]),
+      after: new Date("2026-10-05T07:59:00Z"),
+    });
+
+    expect(candidates).toEqual([
+      {
+        workItemId: 42,
+        revision: 7,
+        actorId: "actor-1",
+        publishedAt: "2026-10-05T08:05:00.000Z",
+        commentId: 11,
+      },
+    ]);
+  });
+
   it("selects authorized created/comment events after the cutoff", () => {
     const candidates = selectAzureWorkItemPollingCandidates({
       workItem: workItem(),
+      configuredMode: "plan",
       discussion: discussion([
         {
           id: 9,
