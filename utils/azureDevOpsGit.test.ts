@@ -100,6 +100,28 @@ describe("Azure DevOps enabled branch ownership", () => {
     ).toThrow("pullfrog/branches/");
   });
 
+  it("blocks an enabled owned-branch commit when ownership proof is missing", async () => {
+    const { root, sha } = makeRepo();
+    const ownedCtx = {
+      ...context(sha),
+      sourceBranch: "pullfrog/branches/fix-123",
+    };
+    try {
+      await expect(
+        commitAndPushAzureDevOpsPullfrogBranch({
+          cwd: root,
+          ctx: ownedCtx,
+          permission: "enabled",
+          message: "fix: test",
+          getLiveSourceCommitId: async () => sha,
+          verifyOwnership: async () => false,
+        })
+      ).rejects.toThrow("ownership proof is missing");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("requires enabled mode before preparing or committing an owned branch", async () => {
     const { root, sha } = makeRepo();
     const ownedCtx = {
@@ -122,6 +144,7 @@ describe("Azure DevOps enabled branch ownership", () => {
           permission: "restricted",
           message: "fix: test",
           getLiveSourceCommitId: async () => sha,
+          verifyOwnership: async () => true,
         })
       ).rejects.toThrow("requires enabled push access");
     } finally {
