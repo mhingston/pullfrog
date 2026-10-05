@@ -23,6 +23,8 @@ import {
   azureDevOpsValidationEvent,
 } from "../providers/azureDevOps.ts";
 import { runPullRequestReview } from "../providers/review.ts";
+import { AzureDevOpsBoardsProvider } from "../providers/azureDevOpsBoards.ts";
+import type { WorkItemMutation } from "../providers/workItems.ts";
 import {
   AzureDevOpsClient,
   AzureDevOpsRepositoryClient,
@@ -68,6 +70,20 @@ import {
   type AzureInlineFinding,
   type AzureStructuredReview,
 } from "./azdoReview.ts";
+import {
+  azureWorkItemBuildBranch,
+  azureWorkItemMarker,
+  buildAzureWorkItemBuildPrompt,
+  buildAzureWorkItemPrompt,
+  deriveAzureWorkItemSearchTerms,
+  parseAzureWorkItemModelResult,
+  parseAzureWorkItemMutationPolicy,
+  renderAzureWorkItemLinksResponse,
+  resolveAzureWorkItemMode,
+  selectAzureWorkItemPollingCandidates,
+  selectAzureWorkItemTrigger,
+  type AzureWorkItemPollingCandidate,
+} from "./azdoWorkItem.ts";
 
 interface AzdoCliParams {
   args: string[];
@@ -83,6 +99,8 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("  review       review the current Azure Repos pull request");
   params.stream("  follow-up    answer one explicit PR thread follow-up");
   params.stream("  poll-follow-ups  scan active PRs for authorized follow-up requests");
+  params.stream("  work-item   triage or handle one Azure Boards work item");
+  params.stream("  poll-work-items scan changed Boards items/comments for authorized requests");
   params.stream("  checkout     prepare the validated PR source branch for code-writing work");
   params.stream("  commit       commit and push current working-tree changes to the PR source branch");
   params.stream("  branch-create create and checkout a Pullfrog-owned Azure branch (enabled only)");
@@ -104,6 +122,16 @@ function printUsage(params: { stream: typeof console.log; prog: string }): void 
   params.stream("      --after <rfc3339>         rollout cutoff with explicit Z/offset (or PULLFROG_AZDO_POLL_AFTER)");
   params.stream("      --allowed-actor-ids <csv> immutable Azure identity IDs (or PULLFROG_AZDO_ALLOWED_ACTOR_IDS)");
   params.stream("      --max <n>                 max model-backed follow-ups per poll, 1-50 (default 10)");
+  params.stream("");
+  params.stream("work-item options:");
+  params.stream("      --work-item <id>           Azure Boards work-item id");
+  params.stream("      --comment <id>             triggering work-item comment id; omit for created-item triage");
+  params.stream("      --mode <mode>               none, links, plan, build, custom (or PULLFROG_ISSUE_MODE)");
+  params.stream("      --allowed-fields <csv>     model-mutatable work-item fields: tags,state");
+  params.stream("      --allowed-states <csv>     allowed Azure state values when state mutation is enabled");
+  params.stream("      --allowed-actor-ids <csv>  immutable Azure identity IDs authorized to trigger runs");
+  params.stream("      --after <rfc3339>           rollout cutoff for poll-work-items");
+  params.stream("      --max <n>                   max work-item requests per poll, 1-50");
   params.stream("");
   params.stream("write options:");
   params.stream("      --push <mode>             disabled, restricted, or enabled (default: PULLFROG_PUSH or restricted)");
