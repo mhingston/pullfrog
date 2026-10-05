@@ -41,10 +41,7 @@ function followUpMarker(threadId: number, commentId: number): string {
 
 function stripPullfrogMarkers(content: string): string {
   return content
-    .replace(
-      /<!-- pullfrog-azure-devops-(?:review|finding|followup|followup-reservation):[^>]+-->/gi,
-      ""
-    )
+    .replace(/<!-- pullfrog-azure-devops-(?:review|finding|followup):[^>]+-->/gi, "")
     .trim();
 }
 
