@@ -1517,6 +1517,7 @@ async function runPollWorkItems(params: {
     const itemCandidates = selectAzureWorkItemPollingCandidates({
       workItem,
       discussion,
+      configuredMode,
       allowedActorIds,
       after,
     });
