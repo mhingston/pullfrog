@@ -239,6 +239,67 @@ describe("AzureDevOpsClient follow-up reservations", () => {
     expect(deleted).toEqual([6]);
   });
 
+  it("yields when a lower-id contender appears during confirmation", async () => {
+    const thread = {
+      id: 17,
+      comments: [{ id: 4, content: "@pullfrog explain this" }],
+    };
+    const deleted: number[] = [];
+    let reads = 0;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.endsWith("/threads/17?api-version=7.1") && method === "GET") {
+        reads += 1;
+        if (reads === 3) {
+          thread.comments.unshift({
+            id: 5,
+            parentCommentId: 4,
+            content: reservationMarker(17, 4, "claim-other"),
+            publishedDate: "2026-10-05T06:00:00Z",
+          });
+        }
+        return jsonResponse(thread);
+      }
+      if (url.endsWith("/threads/17/comments?api-version=7.1") && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        const ours = {
+          id: 6,
+          parentCommentId: body.parentCommentId,
+          content: body.content,
+          publishedDate: "2026-10-05T06:00:00Z",
+        };
+        thread.comments.push(ours);
+        return jsonResponse(ours);
+      }
+      if (url.endsWith("/threads/17/comments/6?api-version=7.1") && method === "DELETE") {
+        deleted.push(6);
+        return jsonResponse(undefined);
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsClient(context());
+    await expect(
+      client.reserveThreadFollowUp({
+        threadId: 17,
+        triggerCommentId: 4,
+        claimId: "claim-mine1",
+        now: new Date("2026-10-05T06:00:00Z"),
+        settleMs: 0,
+      })
+    ).resolves.toEqual({
+      reserved: false,
+      reason: "claimed",
+      commentId: 5,
+    });
+    expect(reads).toBe(3);
+    expect(deleted).toEqual([6]);
+  });
+
   it("does not reserve a request that already has a final reply", async () => {
     const thread = {
       id: 17,
