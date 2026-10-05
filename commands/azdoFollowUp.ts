@@ -1,6 +1,7 @@
 import {
   AZDO_FINDING_MARKER_PREFIX,
   AZDO_FOLLOWUP_MARKER_PREFIX,
+  AZDO_FOLLOWUP_RESERVATION_MARKER_PREFIX,
   AZDO_REVIEW_MARKER_PREFIX,
   type AzureDevOpsComment,
   type AzureDevOpsThread,
@@ -41,7 +42,10 @@ function followUpMarker(threadId: number, commentId: number): string {
 
 function stripPullfrogMarkers(content: string): string {
   return content
-    .replace(/<!-- pullfrog-azure-devops-(?:review|finding|followup):[^>]+-->/gi, "")
+    .replace(
+      /<!-- pullfrog-azure-devops-(?:review|finding|followup|followup-reservation):[^>]+-->/gi,
+      ""
+    )
     .trim();
 }
 
