@@ -273,8 +273,9 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("creates a PR only after independently validating source and target refs", async () => {
+  it("creates a PR only after validating ownership, source, and target refs", async () => {
     const sourceBranch = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(sourceBranch);
     const targetBranch = "main";
     const seenBodies: unknown[] = [];
     let sourceReads = 0;
@@ -283,6 +284,18 @@ describe("Azure DevOps safe PR mutations", () => {
       const url = String(input);
       const method = init?.method ?? "GET";
 
+      if (
+        url.includes(
+          "/refs?filter=" + encodeURIComponent("heads/" + ownershipBranch)
+        )
+      ) {
+        return jsonResponse({
+          value: [{
+            name: "refs/heads/" + ownershipBranch,
+            objectId: targetCommitId,
+          }],
+        });
+      }
       if (url.includes("/refs?filter=heads%2Fpullfrog%2Fbranches%2Ffix-42")) {
         sourceReads += 1;
         return jsonResponse({
