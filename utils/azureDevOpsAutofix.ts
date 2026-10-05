@@ -80,8 +80,7 @@ export function selectAzureCiRepairEligibility(params: {
 export function azureMergeStatusNeedsRepair(
   mergeStatus: string | undefined
 ): boolean {
-  const normalized = mergeStatus?.trim().toLowerCase();
-  return normalized === "conflicts" || normalized === "failure";
+  return mergeStatus?.trim().toLowerCase() === "conflicts";
 }
 
 export function buildAzureCiRepairPrompt(params: {
