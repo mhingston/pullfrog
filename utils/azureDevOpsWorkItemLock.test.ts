@@ -31,19 +31,17 @@ describe("Azure work-item coordination locks", () => {
     expect(
       client.workItemLockRef({
         workItemId: 42,
-        revision: 7,
         commentId: 9,
       })
     ).toBe(
-      "refs/heads/pullfrog/locks/work-item/wi-42-rev-7-comment-9"
+      "refs/heads/pullfrog/locks/work-item/wi-42-comment-9"
     );
     expect(
       client.workItemLockRef({
         workItemId: 42,
-        revision: 7,
       })
     ).toBe(
-      "refs/heads/pullfrog/locks/work-item/wi-42-rev-7-created"
+      "refs/heads/pullfrog/locks/work-item/wi-42-created"
     );
   });
 
@@ -68,7 +66,6 @@ describe("Azure work-item coordination locks", () => {
     const client = new AzureDevOpsRepositoryClient(ctx);
     const acquired = await client.acquireWorkItemLock({
       workItemId: 42,
-      revision: 7,
       commentId: 9,
       anchorCommitId: anchor,
     });
@@ -76,7 +73,7 @@ describe("Azure work-item coordination locks", () => {
       acquired: true,
       lock: {
         refName:
-          "refs/heads/pullfrog/locks/work-item/wi-42-rev-7-comment-9",
+          "refs/heads/pullfrog/locks/work-item/wi-42-comment-9",
         anchorCommitId: anchor,
       },
     });
@@ -88,7 +85,7 @@ describe("Azure work-item coordination locks", () => {
       [
         {
           name:
-            "refs/heads/pullfrog/locks/work-item/wi-42-rev-7-comment-9",
+            "refs/heads/pullfrog/locks/work-item/wi-42-comment-9",
           oldObjectId: "0".repeat(40),
           newObjectId: anchor,
         },
@@ -96,7 +93,7 @@ describe("Azure work-item coordination locks", () => {
       [
         {
           name:
-            "refs/heads/pullfrog/locks/work-item/wi-42-rev-7-comment-9",
+            "refs/heads/pullfrog/locks/work-item/wi-42-comment-9",
           oldObjectId: anchor,
           newObjectId: "0".repeat(40),
         },
@@ -120,14 +117,13 @@ describe("Azure work-item coordination locks", () => {
     await expect(
       client.acquireWorkItemLock({
         workItemId: 42,
-        revision: 7,
         anchorCommitId: anchor,
       })
     ).resolves.toEqual({
       acquired: false,
       reason: "claimed",
       refName:
-        "refs/heads/pullfrog/locks/work-item/wi-42-rev-7-created",
+        "refs/heads/pullfrog/locks/work-item/wi-42-created",
     });
   });
 });
