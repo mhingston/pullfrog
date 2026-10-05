@@ -73,8 +73,17 @@ export interface AzureDevOpsPullRequest {
   sourceRefName: string;
   targetRefName: string;
   repository?: { id?: string | undefined } | undefined;
-  createdBy?: { displayName?: string | undefined } | undefined;
+  createdBy?:
+    | {
+        id?: string | undefined;
+        displayName?: string | undefined;
+        uniqueName?: string | undefined;
+      }
+    | undefined;
+  mergeStatus?: string | undefined;
   lastMergeSourceCommit?: { commitId?: string | undefined } | undefined;
+  lastMergeTargetCommit?: { commitId?: string | undefined } | undefined;
+  lastMergeCommit?: { commitId?: string | undefined } | undefined;
   url?: string | undefined;
 }
 
@@ -176,6 +185,24 @@ export interface AzureDevOpsFollowUpLock {
   refName: string;
   sourceCommitId: string;
 }
+
+export type AzureDevOpsRepairKind = "ci" | "conflict";
+
+export type AzureDevOpsRepairAttemptReservation =
+  | {
+      acquired: true;
+      kind: AzureDevOpsRepairKind;
+      attempt: number;
+      refName: string;
+      sourceCommitId: string;
+    }
+  | {
+      acquired: false;
+      kind: AzureDevOpsRepairKind;
+      reason: "source-already-attempted" | "attempt-budget-exhausted" | "claimed";
+      refName?: string | undefined;
+      attempt?: number | undefined;
+    };
 
 function required(name: string, value: string | undefined): string {
   const trimmed = value?.trim();
@@ -864,6 +891,153 @@ export class AzureDevOpsRepositoryClient {
     return results.slice(0, max);
   }
 
+  async listRefsByPrefix(prefix: string): Promise<AzureDevOpsGitRef[]> {
+    const normalized = prefix.replace(/^refs\/heads\//, "");
+    if (!normalized || normalized.startsWith("/") || normalized.includes("..")) {
+      throw new Error("Azure DevOps ref prefix is invalid: " + prefix);
+    }
+    const response = await this.#request<AzureDevOpsList<AzureDevOpsGitRef>>(
+      "/refs?filter=" +
+        encodeURIComponent("heads/" + normalized) +
+        "&$top=100&api-version=7.1"
+    );
+    return response.value.filter((ref) =>
+      ref.name.startsWith("refs/heads/" + normalized)
+    );
+  }
+
+  repairAttemptPrefix(params: {
+    pullRequestId: number;
+    kind: AzureDevOpsRepairKind;
+  }): string {
+    if (!Number.isInteger(params.pullRequestId) || params.pullRequestId <= 0) {
+      throw new Error("Azure DevOps repair attempt requires a positive PR id");
+    }
+    return (
+      "pullfrog/repairs/pr-" +
+      params.pullRequestId +
+      "/" +
+      params.kind +
+      "/attempt-"
+    );
+  }
+
+  async reserveRepairAttempt(params: {
+    pullRequestId: number;
+    kind: AzureDevOpsRepairKind;
+    sourceCommitId: string;
+    maxAttempts?: number | undefined;
+  }): Promise<AzureDevOpsRepairAttemptReservation> {
+    const sourceCommitId = params.sourceCommitId.trim().toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(sourceCommitId)) {
+      throw new Error("Azure DevOps repair attempt requires a valid source commit");
+    }
+    const maxAttempts = params.maxAttempts ?? 3;
+    if (!Number.isInteger(maxAttempts) || maxAttempts <= 0 || maxAttempts > 10) {
+      throw new Error("Azure DevOps repair max attempts must be between 1 and 10");
+    }
+
+    const prefix = this.repairAttemptPrefix(params);
+    const fullPrefix = "refs/heads/" + prefix;
+    const existing = await this.listRefsByPrefix(prefix);
+    const attempts = existing
+      .map((ref) => {
+        if (!ref.name.startsWith(fullPrefix)) return undefined;
+        const rawAttempt = ref.name.slice(fullPrefix.length);
+        if (!/^\d+$/.test(rawAttempt)) return undefined;
+        const attempt = Number(rawAttempt);
+        if (!Number.isInteger(attempt) || attempt <= 0) return undefined;
+        return {
+          attempt,
+          refName: ref.name,
+          sourceCommitId: ref.objectId?.toLowerCase(),
+        };
+      })
+      .filter(
+        (
+          entry
+        ): entry is {
+          attempt: number;
+          refName: string;
+          sourceCommitId: string | undefined;
+        } => entry !== undefined
+      )
+      .sort((left, right) => left.attempt - right.attempt);
+
+    const duplicate = attempts.find(
+      (entry) => entry.sourceCommitId === sourceCommitId
+    );
+    if (duplicate) {
+      return {
+        acquired: false,
+        kind: params.kind,
+        reason: "source-already-attempted",
+        refName: duplicate.refName,
+        attempt: duplicate.attempt,
+      };
+    }
+
+    if (attempts.length >= maxAttempts) {
+      return {
+        acquired: false,
+        kind: params.kind,
+        reason: "attempt-budget-exhausted",
+      };
+    }
+
+    const attempt = (attempts.at(-1)?.attempt ?? 0) + 1;
+    if (attempt > maxAttempts) {
+      return {
+        acquired: false,
+        kind: params.kind,
+        reason: "attempt-budget-exhausted",
+      };
+    }
+
+    const refName = prefix + attempt;
+    const zeros = "0".repeat(40);
+    const response = await this.#request<AzureDevOpsRefUpdateResponse>(
+      "/refs?api-version=7.1",
+      {
+        method: "POST",
+        body: JSON.stringify([
+          {
+            name: "refs/heads/" + refName,
+            oldObjectId: zeros,
+            newObjectId: sourceCommitId,
+          },
+        ]),
+      }
+    );
+    const result = Array.isArray(response) ? response[0] : response.value?.[0];
+    if (!result) {
+      throw new Error("Azure DevOps repair attempt reservation returned no result");
+    }
+    if (result.success === true || result.updateStatus === "succeeded") {
+      return {
+        acquired: true,
+        kind: params.kind,
+        attempt,
+        refName,
+        sourceCommitId,
+      };
+    }
+    if (result.updateStatus === "staleOldObjectId") {
+      return {
+        acquired: false,
+        kind: params.kind,
+        reason: "claimed",
+        refName,
+        attempt,
+      };
+    }
+    throw new Error(
+      "Azure DevOps repair attempt reservation failed: " +
+        (result.updateStatus ?? "unknown") +
+        (result.customMessage ? " -- " + result.customMessage : "")
+    );
+  }
+
   followUpLockRef(params: {
     pullRequestId: number;
     threadId: number;
@@ -1066,6 +1240,32 @@ export class AzureDevOpsClient {
       method: "PATCH",
       body: JSON.stringify({ description }),
     });
+  }
+
+  async hasPullfrogReviewForSource(
+    sourceCommitId: string,
+    trustedAuthorId: string
+  ): Promise<boolean> {
+    const normalized = sourceCommitId.trim().toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(normalized)) {
+      throw new Error("Azure DevOps review lookup requires a valid source commit");
+    }
+    const trusted = trustedAuthorId.trim().toLowerCase();
+    if (!trusted) {
+      throw new Error(
+        "Azure DevOps review lookup requires a trusted immutable author id"
+      );
+    }
+    const marker = azureDevOpsReviewMarker(normalized);
+    return (await this.listThreads()).some((thread) =>
+      (thread.comments ?? []).some(
+        (comment) =>
+          !comment.isDeleted &&
+          comment.author?.id?.trim().toLowerCase() === trusted &&
+          typeof comment.content === "string" &&
+          comment.content.includes(marker)
+      )
+    );
   }
 
   async getThread(threadId: number): Promise<AzureDevOpsThread> {

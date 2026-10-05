@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertAzureDevOpsMergeConfigSafe,
   azureDevOpsSourcePushArgs,
+  commitAndPushAzureDevOpsMergeResolution,
   commitAndPushAzureDevOpsPullfrogBranch,
   commitAndPushAzureDevOpsSource,
   parseAzureDevOpsPushPermission,
@@ -147,6 +149,114 @@ describe("Azure DevOps enabled branch ownership", () => {
           verifyOwnership: async () => true,
         })
       ).rejects.toThrow("requires enabled push access");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Azure DevOps merge repair safety", () => {
+  it("rejects local executable merge/filter configuration", () => {
+    const { root } = makeRepo();
+    try {
+      git(root, ["config", "--local", "merge.evil.driver", "sh -c 'touch /tmp/pwned'"]);
+      expect(() => assertAzureDevOpsMergeConfigSafe(root)).toThrow(
+        "executable/local merge config"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks finalization while conflict markers remain in an expected conflict file", async () => {
+    const { root, sha } = makeRepo();
+    try {
+      git(root, ["checkout", "-b", "target-for-test", sha]);
+      writeFileSync(join(root, "target.txt"), "target\n");
+      git(root, ["add", "."]);
+      git(root, ["commit", "-m", "target"]);
+      const targetSha = git(root, ["rev-parse", "HEAD"]).toLowerCase();
+      git(root, ["checkout", "feature/write"]);
+      writeFileSync(
+        join(root, "base.txt"),
+        "<<<<<<< HEAD\nsource\n=======\ntarget\n>>>>>>> target\n"
+      );
+      writeFileSync(join(root, ".git", "MERGE_HEAD"), targetSha + "\n");
+
+      await expect(
+        commitAndPushAzureDevOpsMergeResolution({
+          cwd: root,
+          ctx: context(sha),
+          permission: "restricted",
+          message: "fix: resolve merge",
+          targetSha,
+          conflictedFiles: ["base.txt"],
+          getLiveSourceCommitId: async () => sha,
+          getLiveTargetCommitId: async () => targetSha,
+        })
+      ).rejects.toThrow("conflict markers remain in base.txt");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("honors a file's configured conflict-marker-size", async () => {
+    const { root, sha } = makeRepo();
+    try {
+      git(root, ["checkout", "-b", "target-for-test", sha]);
+      writeFileSync(join(root, "target.txt"), "target\n");
+      git(root, ["add", "."]);
+      git(root, ["commit", "-m", "target"]);
+      const targetSha = git(root, ["rev-parse", "HEAD"]).toLowerCase();
+      git(root, ["checkout", "feature/write"]);
+      writeFileSync(join(root, ".gitattributes"), "base.txt conflict-marker-size=10\n");
+      writeFileSync(
+        join(root, "base.txt"),
+        "<<<<<<<<<< HEAD\nsource\n==========\ntarget\n>>>>>>>>>> target\n"
+      );
+      writeFileSync(join(root, ".git", "MERGE_HEAD"), targetSha + "\n");
+
+      await expect(
+        commitAndPushAzureDevOpsMergeResolution({
+          cwd: root,
+          ctx: context(sha),
+          permission: "restricted",
+          message: "fix: resolve merge",
+          targetSha,
+          conflictedFiles: ["base.txt"],
+          getLiveSourceCommitId: async () => sha,
+          getLiveTargetCommitId: async () => targetSha,
+        })
+      ).rejects.toThrow("conflict markers remain in base.txt");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the target moves during conflict resolution", async () => {
+    const { root, sha } = makeRepo();
+    try {
+      git(root, ["checkout", "-b", "target-for-test", sha]);
+      writeFileSync(join(root, "target.txt"), "target\n");
+      git(root, ["add", "."]);
+      git(root, ["commit", "-m", "target"]);
+      const targetSha = git(root, ["rev-parse", "HEAD"]).toLowerCase();
+      git(root, ["checkout", "feature/write"]);
+      writeFileSync(join(root, ".git", "MERGE_HEAD"), targetSha + "\n");
+
+      await expect(
+        commitAndPushAzureDevOpsMergeResolution({
+          cwd: root,
+          ctx: context(sha),
+          permission: "restricted",
+          message: "fix: resolve merge",
+          targetSha,
+          conflictedFiles: [],
+          getLiveSourceCommitId: async () => sha,
+          getLiveTargetCommitId: async () =>
+            "fedcba9876543210fedcba9876543210fedcba98",
+        })
+      ).rejects.toThrow("target moved during conflict resolution");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

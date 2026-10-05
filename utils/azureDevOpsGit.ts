@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -185,6 +185,21 @@ export function scrubAzureDevOpsGitCredentials(cwd: string): void {
           String(result.stderr || result.stdout || "").trim()
       );
     }
+  }
+}
+
+export function assertAzureDevOpsMergeConfigSafe(cwd: string): void {
+  const dangerous = [
+    ...localConfigKeys(cwd, "^merge\\..*\\.driver$"),
+    ...localConfigKeys(cwd, "^filter\\..*\\.(clean|smudge|process)$"),
+    ...localConfigKeys(cwd, "^core\\.attributesfile$"),
+    ...localConfigKeys(cwd, "^core\\.hookspath$"),
+  ];
+  if (dangerous.length > 0) {
+    throw new Error(
+      "Azure DevOps merge repair blocked by executable/local merge config: " +
+        dangerous.join(", ")
+    );
   }
 }
 
@@ -435,6 +450,416 @@ function assertNoChangedLfsFiles(cwd: string, files: string[]): void {
       );
     }
   }
+}
+
+export interface AzureDevOpsMergePreparation {
+  branch: string;
+  sourceSha: string;
+  targetSha: string;
+  conflictedFiles: string[];
+}
+
+function inProgressGitRef(cwd: string, ref: string): string | undefined {
+  const result = spawnSync("git", ["rev-parse", "-q", "--verify", ref], {
+    cwd,
+    encoding: "utf-8",
+    env: credentialFreeEnv(),
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) return undefined;
+  const value = String(result.stdout || "").trim().toLowerCase();
+  return value || undefined;
+}
+
+function unresolvedMergeFiles(cwd: string): string[] {
+  return git(cwd, ["diff", "--name-only", "--diff-filter=U", "--"])
+    .split("\n")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function conflictMarkerSize(cwd: string, file: string): number {
+  const output = git(cwd, [
+    "check-attr",
+    "conflict-marker-size",
+    "--",
+    file,
+  ]).trim();
+  const value = output.split(": ").at(-1)?.trim();
+  if (!value || value === "unspecified") return 7;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: invalid conflict-marker-size for " +
+        file +
+        ": " +
+        value
+    );
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 1000) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: invalid conflict-marker-size for " +
+        file +
+        ": " +
+        value
+    );
+  }
+  return parsed;
+}
+
+function hasConflictMarkers(
+  content: string,
+  markerSize: number
+): boolean {
+  const open = "<".repeat(markerSize);
+  const base = "|".repeat(markerSize);
+  const split = "=".repeat(markerSize);
+  const close = ">".repeat(markerSize);
+  return content.split(/\r?\n/).some(
+    (line) =>
+      line.startsWith(open + " ") ||
+      line.startsWith(base + " ") ||
+      line.trimEnd() === split ||
+      line.startsWith(close + " ")
+  );
+}
+
+
+export async function prepareAzureDevOpsMergeResolution(params: {
+  cwd: string;
+  ctx: AzureDevOpsGitContext;
+  permission: AzureDevOpsPushPermission;
+  getLiveSourceCommitId: () => Promise<string | undefined>;
+  getLiveTargetCommitId: () => Promise<string | undefined>;
+}): Promise<AzureDevOpsMergePreparation> {
+  assertPrSourceWriteAllowed(params.ctx, params.permission);
+  scrubAzureDevOpsGitCredentials(params.cwd);
+  assertNoInProgressGitOperation(params.cwd);
+
+  const branch = validateAzureDevOpsBranchName(params.ctx.sourceBranch);
+  const targetBranch = validateAzureDevOpsBranchName(params.ctx.targetBranch);
+  const sourceSha = params.ctx.sourceCommitId.toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(sourceSha)) {
+    throw new Error("Azure DevOps merge repair requires a valid source SHA");
+  }
+
+  const currentBranch = git(params.cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  const head = git(params.cwd, ["rev-parse", "HEAD"]).trim().toLowerCase();
+  if (currentBranch !== branch || head !== sourceSha) {
+    throw new Error(
+      "Azure DevOps merge repair blocked: checkout is not the validated PR source"
+    );
+  }
+
+  const liveSource = (await params.getLiveSourceCommitId())?.toLowerCase();
+  if (!liveSource || liveSource !== sourceSha) {
+    throw new Error(
+      "Azure DevOps merge repair blocked: PR source changed before merge preparation"
+    );
+  }
+
+  const remoteSource = fetchAzureDevOpsBranch({
+    cwd: params.cwd,
+    ctx: params.ctx,
+    branch,
+  });
+  if (remoteSource !== sourceSha) {
+    throw new Error(
+      "Azure DevOps merge repair blocked: remote source changed before merge preparation"
+    );
+  }
+
+  const targetSha = (await params.getLiveTargetCommitId())?.toLowerCase();
+  if (!targetSha || !/^[0-9a-f]{40}$/.test(targetSha)) {
+    throw new Error(
+      "Azure DevOps merge repair blocked: unable to resolve live target commit"
+    );
+  }
+  const remoteTarget = fetchAzureDevOpsBranch({
+    cwd: params.cwd,
+    ctx: params.ctx,
+    branch: targetBranch,
+  });
+  if (remoteTarget !== targetSha) {
+    throw new Error(
+      "Azure DevOps merge repair blocked: target changed while it was fetched"
+    );
+  }
+
+  assertAzureDevOpsMergeConfigSafe(params.cwd);
+  const isolated = mkdtempSync(join(tmpdir(), "pullfrog-azdo-merge-"));
+  const hooksDir = join(isolated, "hooks");
+  const homeDir = join(isolated, "home");
+  mkdirSync(hooksDir);
+  mkdirSync(homeDir);
+
+  const merge = (() => {
+    try {
+      return spawnSync(
+        "git",
+        [
+          "-c",
+          "credential.helper=",
+          "-c",
+          "core.hooksPath=" + hooksDir,
+          "merge",
+          "--no-commit",
+          "--no-ff",
+          remoteTrackingRef(targetBranch),
+        ],
+        {
+          cwd: params.cwd,
+          encoding: "utf-8",
+          maxBuffer: 32 * 1024 * 1024,
+          env: credentialFreeEnv({
+            HOME: homeDir,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_GLOBAL: join(isolated, "global.gitconfig"),
+          }),
+        }
+      );
+    } finally {
+      rmSync(isolated, { recursive: true, force: true });
+    }
+  })();
+  if (merge.error) throw merge.error;
+
+  const mergeHead = inProgressGitRef(params.cwd, "MERGE_HEAD");
+  if (mergeHead !== targetSha) {
+    throw new Error(
+      "Azure DevOps merge repair blocked: MERGE_HEAD does not match the validated target"
+    );
+  }
+
+  const conflictedFiles = unresolvedMergeFiles(params.cwd);
+  if (merge.status !== 0 && conflictedFiles.length === 0) {
+    throw new Error(
+      "Azure DevOps git merge failed without resolvable file conflicts (exit " +
+        merge.status +
+        "): " +
+        String(merge.stderr || merge.stdout || "").trim()
+    );
+  }
+
+  return { branch, sourceSha, targetSha, conflictedFiles };
+}
+
+export function abortAzureDevOpsMergeResolution(cwd: string): void {
+  if (!inProgressGitRef(cwd, "MERGE_HEAD")) return;
+  const result = spawnSync("git", ["merge", "--abort"], {
+    cwd,
+    encoding: "utf-8",
+    maxBuffer: 32 * 1024 * 1024,
+    env: credentialFreeEnv(),
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(
+      "Azure DevOps merge abort failed: " +
+        String(result.stderr || result.stdout || "").trim()
+    );
+  }
+}
+
+export async function commitAndPushAzureDevOpsMergeResolution(params: {
+  cwd: string;
+  ctx: AzureDevOpsGitContext;
+  permission: AzureDevOpsPushPermission;
+  message: string;
+  targetSha: string;
+  conflictedFiles: string[];
+  getLiveSourceCommitId: () => Promise<string | undefined>;
+  getLiveTargetCommitId: () => Promise<string | undefined>;
+  dryRun?: boolean | undefined;
+}): Promise<AzureDevOpsWriteResult> {
+  assertPrSourceWriteAllowed(params.ctx, params.permission);
+  scrubAzureDevOpsGitCredentials(params.cwd);
+
+  for (const ref of ["CHERRY_PICK_HEAD", "REVERT_HEAD"]) {
+    if (inProgressGitRef(params.cwd, ref)) {
+      throw new Error(
+        "Azure DevOps merge commit blocked: unexpected git operation is in progress (" +
+          ref +
+          ")"
+      );
+    }
+  }
+
+  const branch = validateAzureDevOpsBranchName(params.ctx.sourceBranch);
+  const targetBranch = validateAzureDevOpsBranchName(params.ctx.targetBranch);
+  const expectedSource = params.ctx.sourceCommitId.toLowerCase();
+  const expectedTarget = params.targetSha.trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(expectedTarget)) {
+    throw new Error("Azure DevOps merge commit requires a valid target SHA");
+  }
+
+  const currentBranch = git(params.cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  const head = git(params.cwd, ["rev-parse", "HEAD"]).trim().toLowerCase();
+  const mergeHead = inProgressGitRef(params.cwd, "MERGE_HEAD");
+  if (currentBranch !== branch || head !== expectedSource) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: checkout moved away from the validated source"
+    );
+  }
+  if (mergeHead !== expectedTarget) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: MERGE_HEAD changed from the validated target"
+    );
+  }
+
+  const expectedConflictFiles = [...new Set(params.conflictedFiles)].sort();
+  if (expectedConflictFiles.length > 0) {
+    for (const file of expectedConflictFiles) {
+      const fullPath = join(params.cwd, file);
+      let content: string;
+      try {
+        content = readFileSync(fullPath, "utf-8");
+      } catch (error) {
+        // A deleted conflict can be a valid resolution. Let git add record the
+        // deletion, but fail on other unreadable-file shapes below if they stay
+        // unresolved.
+        if (
+          !(error instanceof Error) ||
+          !("code" in error) ||
+          error.code !== "ENOENT"
+        ) {
+          throw error;
+        }
+        continue;
+      }
+      if (hasConflictMarkers(content, conflictMarkerSize(params.cwd, file))) {
+        throw new Error(
+          "Azure DevOps merge commit blocked: conflict markers remain in " + file
+        );
+      }
+    }
+
+    git(params.cwd, ["add", "-A", "--", ...expectedConflictFiles]);
+  }
+
+  const unresolved = unresolvedMergeFiles(params.cwd);
+  if (unresolved.length > 0) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: unresolved conflict files remain: " +
+        unresolved.join(", ")
+    );
+  }
+
+  const liveSource = (await params.getLiveSourceCommitId())?.toLowerCase();
+  const liveTarget = (await params.getLiveTargetCommitId())?.toLowerCase();
+  if (liveSource !== expectedSource) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: source moved during conflict resolution"
+    );
+  }
+  if (liveTarget !== expectedTarget) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: target moved during conflict resolution"
+    );
+  }
+
+  const remoteSource = fetchAzureDevOpsBranch({
+    cwd: params.cwd,
+    ctx: params.ctx,
+    branch,
+  });
+  const remoteTarget = fetchAzureDevOpsBranch({
+    cwd: params.cwd,
+    ctx: params.ctx,
+    branch: targetBranch,
+  });
+  if (remoteSource !== expectedSource || remoteTarget !== expectedTarget) {
+    throw new Error(
+      "Azure DevOps merge commit blocked: remote source/target changed during conflict resolution"
+    );
+  }
+
+  const message = params.message.trim();
+  if (!message) throw new Error("Azure DevOps merge commit message must not be empty");
+  if (message.length > 5000) {
+    throw new Error("Azure DevOps merge commit message must be 5000 characters or fewer");
+  }
+
+  const files = changedFiles(params.cwd);
+  if (files.length === 0) {
+    throw new Error("Azure DevOps merge commit blocked: merge has no working-tree changes");
+  }
+  assertNoChangedLfsFiles(params.cwd, files);
+
+  if (params.dryRun) {
+    return {
+      branch,
+      previousSha: expectedSource,
+      pushedSha: expectedSource,
+      files,
+    };
+  }
+
+  git(params.cwd, ["add", "-A", "--", ":/"]);
+
+  const isolated = mkdtempSync(join(tmpdir(), "pullfrog-azdo-merge-commit-"));
+  try {
+    const commit = spawnSync(
+      "git",
+      [
+        "-c",
+        "core.hooksPath=" + isolated,
+        "-c",
+        "commit.gpgSign=false",
+        "-c",
+        "user.name=Pullfrog",
+        "-c",
+        "user.email=pullfrog@users.noreply.github.com",
+        "commit",
+        "-m",
+        message,
+      ],
+      {
+        cwd: params.cwd,
+        encoding: "utf-8",
+        maxBuffer: 32 * 1024 * 1024,
+        env: credentialFreeEnv({
+          HOME: isolated,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: join(isolated, "global.gitconfig"),
+        }),
+      }
+    );
+    if (commit.error) throw commit.error;
+    if (commit.status !== 0) {
+      throw new Error(
+        "Azure DevOps merge git commit failed (exit " +
+          commit.status +
+          "): " +
+          String(commit.stderr || commit.stdout || "").trim()
+      );
+    }
+  } finally {
+    rmSync(isolated, { recursive: true, force: true });
+  }
+
+  const pushedSha = git(params.cwd, ["rev-parse", "HEAD"]).trim().toLowerCase();
+  const firstParent = git(params.cwd, ["rev-parse", "HEAD^1"]).trim().toLowerCase();
+  const secondParent = git(params.cwd, ["rev-parse", "HEAD^2"]).trim().toLowerCase();
+  if (firstParent !== expectedSource || secondParent !== expectedTarget) {
+    throw new Error(
+      "Azure DevOps merge push blocked: generated merge commit parents do not match validated source/target"
+    );
+  }
+
+  authenticatedGit(
+    params.cwd,
+    params.ctx,
+    "push",
+    azureDevOpsSourcePushArgs(branch, expectedSource)
+  );
+
+  return {
+    branch,
+    previousSha: expectedSource,
+    pushedSha,
+    files,
+  };
 }
 
 export async function commitAndPushAzureDevOpsPullfrogBranch(params: {
