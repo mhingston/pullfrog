@@ -434,3 +434,56 @@ describe("AzureDevOpsBuildClient", () => {
     ]);
   });
 });
+
+
+describe("AzureDevOpsBuildClient in-progress validation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("collects already-failed timeline diagnostics from the current in-progress validation build", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/builds/10?api-version=7.1")) {
+        return jsonResponse({
+          id: 10,
+          status: "inProgress",
+          triggerInfo: {
+            "pr.number": "42",
+            "pr.sourceSha": sourceSha,
+          },
+        });
+      }
+      if (url.endsWith("/builds/10/timeline?api-version=7.1")) {
+        return jsonResponse({
+          records: [
+            {
+              id: "task-failed",
+              type: "Task",
+              name: "tests",
+              result: "failed",
+              log: { id: 9 },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/builds/10/logs/9?api-version=7.1")) {
+        return new Response("##[error] tests failed\n", { status: 200 });
+      }
+      throw new Error("unexpected request: " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsBuildClient(context());
+    await expect(
+      client.collectFailureContext({
+        buildId: 10,
+        pullRequestId: 42,
+        sourceSha,
+      })
+    ).resolves.toMatchObject({
+      build: { id: 10, status: "inProgress" },
+      failedLogs: [{ recordName: "tests" }],
+    });
+  });
+});
