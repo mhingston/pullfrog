@@ -1221,9 +1221,20 @@ async function runAutofixCi(params: {
   const pullfrogOwned =
     ctx.sourceBranch.startsWith("pullfrog/branches/") &&
     (await repositoryClient.hasPullfrogBranchOwnership(ctx.sourceBranch));
-  const reviewedAtSource = pullfrogOwned
-    ? false
-    : await client.hasPullfrogReviewForSource(sourceSha);
+  let reviewedAtSource = false;
+  if (!pullfrogOwned && settings.reviewedPrs) {
+    const trustedReviewAuthorId =
+      process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID?.trim();
+    if (!trustedReviewAuthorId) {
+      throw new Error(
+        "PULLFROG_AZDO_REVIEW_IDENTITY_ID is required when reviewed-PR Azure CI autofix is enabled"
+      );
+    }
+    reviewedAtSource = await client.hasPullfrogReviewForSource(
+      sourceSha,
+      trustedReviewAuthorId
+    );
+  }
   const eligibility = selectAzureCiRepairEligibility({
     pullfrogOwned,
     reviewedAtSource,
