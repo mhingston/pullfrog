@@ -49,7 +49,22 @@ function parseStrictRfc3339(value: string): Date | undefined {
     return undefined;
   }
 
-  const maxDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  const maxDay = daysInMonth[month - 1]!;
   if (day < 1 || day > maxDay) return undefined;
 
   if (zone !== "Z") {
