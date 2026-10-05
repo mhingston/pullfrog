@@ -1998,7 +1998,10 @@ async function runAutofixCi(params: {
     ctx.sourceBranch.startsWith("pullfrog/branches/") &&
     (await repositoryClient.hasPullfrogBranchOwnership(ctx.sourceBranch));
   let reviewedAtSource = false;
-  if (settings.ownPrs || settings.reviewedPrs) {
+  if (
+    (pullfrogOwned && settings.ownPrs) ||
+    (!pullfrogOwned && settings.reviewedPrs)
+  ) {
     const trustedReviewAuthorId =
       process.env.PULLFROG_AZDO_REVIEW_IDENTITY_ID?.trim();
     if (!trustedReviewAuthorId) {
