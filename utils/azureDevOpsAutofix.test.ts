@@ -45,14 +45,14 @@ describe("Azure CI autofix eligibility", () => {
     maxAttempts: 3,
   };
 
-  it("uses the separate own-PR toggle for Pullfrog-owned PRs", () => {
+  it("requires the own-PR toggle and an exact-source trusted review for Pullfrog-owned PRs", () => {
     expect(
       selectAzureCiRepairEligibility({
         pullfrogOwned: true,
         reviewedAtSource: false,
         settings: bothEnabled,
       })
-    ).toEqual({ eligible: true, class: "own" });
+    ).toEqual({ eligible: false, reason: "not-pullfrog-reviewed" });
 
     expect(
       selectAzureCiRepairEligibility({
@@ -61,6 +61,14 @@ describe("Azure CI autofix eligibility", () => {
         settings: { ...bothEnabled, ownPrs: false },
       })
     ).toEqual({ eligible: false, reason: "own-pr-fixes-disabled" });
+
+    expect(
+      selectAzureCiRepairEligibility({
+        pullfrogOwned: true,
+        reviewedAtSource: true,
+        settings: bothEnabled,
+      })
+    ).toEqual({ eligible: true, class: "own" });
   });
 
   it("requires both an exact-source Pullfrog review and the reviewed-PR toggle for human PRs", () => {
