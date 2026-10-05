@@ -256,6 +256,78 @@ describe("Azure DevOps safe PR mutations", () => {
     expect(refPosts).toHaveLength(2);
   });
 
+  it("rolls back the source branch when ownership-ref creation fails", async () => {
+    const branchName = "pullfrog/branches/fix-42";
+    const ownershipBranch = azureDevOpsBranchOwnershipBranch(branchName);
+    let refPost = 0;
+    let rolledBack = false;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url.includes("/refs?filter=heads%2Fmain")) {
+        return jsonResponse({
+          value: [{ name: "refs/heads/main", objectId: targetCommitId }],
+        });
+      }
+      if (url.endsWith("/refs?api-version=7.1") && method === "POST") {
+        refPost += 1;
+        const body = JSON.parse(String(init?.body));
+        if (refPost === 1) {
+          expect(body[0]?.name).toBe("refs/heads/" + branchName);
+          return jsonResponse([
+            {
+              name: body[0]?.name,
+              updateStatus: "succeeded",
+              success: true,
+            },
+          ]);
+        }
+        if (refPost === 2) {
+          expect(body[0]?.name).toBe("refs/heads/" + ownershipBranch);
+          return jsonResponse([
+            {
+              name: body[0]?.name,
+              updateStatus: "staleOldObjectId",
+              success: false,
+            },
+          ]);
+        }
+        expect(body).toEqual([
+          {
+            name: "refs/heads/" + branchName,
+            oldObjectId: targetCommitId,
+            newObjectId: "0".repeat(40),
+          },
+        ]);
+        rolledBack = true;
+        return jsonResponse([
+          {
+            name: "refs/heads/" + branchName,
+            updateStatus: "succeeded",
+            success: true,
+          },
+        ]);
+      }
+      throw new Error("unexpected request: " + method + " " + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new AzureDevOpsRepositoryClient(
+      resolveAzureDevOpsContext(baseEnv)
+    );
+    await expect(
+      client.createPullfrogBranch({
+        branch: branchName,
+        targetBranch: "main",
+        permission: "enabled",
+      })
+    ).rejects.toThrow("branch ownership creation failed");
+
+    expect(rolledBack).toBe(true);
+  });
+
   it("CAS-deletes an owned branch and its ownership ref", async () => {
     const branchName = "pullfrog/branches/fix-42";
     const ownershipBranch = azureDevOpsBranchOwnershipBranch(branchName);
