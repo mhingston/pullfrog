@@ -333,6 +333,77 @@ export function buildAzureDevOpsPullRequestDiff(params: {
   };
 }
 
+export class AzureDevOpsRepositoryClient {
+  readonly #ctx: AzureDevOpsRepositoryContext;
+
+  constructor(ctx: AzureDevOpsRepositoryContext) {
+    this.#ctx = ctx;
+  }
+
+  #url(path: string): string {
+    const project = encodeURIComponent(this.#ctx.project);
+    const repo = encodeURIComponent(this.#ctx.repositoryId);
+    return new URL(
+      project + "/_apis/git/repositories/" + repo + path,
+      this.#ctx.collectionUri
+    ).toString();
+  }
+
+  async #request<T>(path: string, init?: RequestInit): Promise<T> {
+    const headers = new Headers(init?.headers);
+    headers.set("Accept", "application/json");
+    headers.set("Authorization", this.#ctx.authorization);
+    if (init?.body) headers.set("Content-Type", "application/json");
+
+    const response = await fetch(this.#url(path), {
+      ...init,
+      headers,
+      signal: init?.signal ?? AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      const body = (await response.text()).slice(0, 1000);
+      throw new Error(
+        "Azure DevOps API failed: " +
+          response.status +
+          " " +
+          response.statusText +
+          (body ? " -- " + body : "")
+      );
+    }
+    const text = await response.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
+  }
+
+  async listActivePullRequests(params?: {
+    max?: number | undefined;
+  }): Promise<AzureDevOpsPullRequest[]> {
+    const max = params?.max ?? 200;
+    if (!Number.isInteger(max) || max <= 0 || max > 1000) {
+      throw new Error("Azure DevOps active PR max must be between 1 and 1000");
+    }
+
+    const results: AzureDevOpsPullRequest[] = [];
+    const pageSize = Math.min(100, max);
+
+    for (let skip = 0; results.length < max; skip += pageSize) {
+      const remaining = max - results.length;
+      const top = Math.min(pageSize, remaining);
+      const response = await this.#request<AzureDevOpsList<AzureDevOpsPullRequest>>(
+        "/pullrequests?searchCriteria.status=active&$skip=" +
+          skip +
+          "&$top=" +
+          top +
+          "&api-version=7.1"
+      );
+      results.push(...response.value);
+      if (response.value.length < top) break;
+    }
+
+    return results.slice(0, max);
+  }
+}
+
 export class AzureDevOpsClient {
   readonly #ctx: AzureDevOpsClientContext;
 
@@ -631,7 +702,7 @@ export class AzureDevOpsClient {
     };
   }
 
-  async #listThreads(): Promise<AzureDevOpsThread[]> {
+  async listThreads(): Promise<AzureDevOpsThread[]> {
     const response = await this.#request<AzureDevOpsList<AzureDevOpsThread>>(
       "/threads?api-version=7.1"
     );
@@ -756,7 +827,7 @@ export class AzureDevOpsClient {
       }
     }
 
-    const before = this.#markedFindingThreads(await this.#listThreads());
+    const before = this.#markedFindingThreads(await this.listThreads());
     const desired = new Map<
       string,
       { finding: AzureDevOpsInlineFinding; content: string; changeTrackingId: number }
@@ -840,7 +911,7 @@ export class AzureDevOpsClient {
 
     // Re-list to converge concurrent same-location creates and close findings
     // that disappeared on a rerun or belong to an older source iteration.
-    const after = this.#markedFindingThreads(await this.#listThreads());
+    const after = this.#markedFindingThreads(await this.listThreads());
     const liveAfter =
       (await this.getLiveSourceCommitId()) ?? normalizedSourceCommitId;
 
@@ -905,7 +976,7 @@ export class AzureDevOpsClient {
 
     const marker = azureDevOpsReviewMarker(normalizedSourceCommitId);
     const content = markdown.trim() + "\n\n" + marker;
-    const before = this.#markedThreads(await this.#listThreads()).filter(
+    const before = this.#markedThreads(await this.listThreads()).filter(
       (entry) => entry.sourceCommitId === normalizedSourceCommitId
     );
 
@@ -938,7 +1009,7 @@ export class AzureDevOpsClient {
     // POST is not conditional, so two overlapping jobs can both create a
     // thread. Re-list after the write, choose the lowest ID as the stable
     // canonical thread for the current source commit, and close duplicates.
-    const after = this.#markedThreads(await this.#listThreads());
+    const after = this.#markedThreads(await this.listThreads());
     const liveAfter = (await this.getLiveSourceCommitId()) ?? normalizedSourceCommitId;
     const liveThreads = after.filter((entry) => entry.sourceCommitId === liveAfter);
     const canonicalLive = liveThreads[0];
