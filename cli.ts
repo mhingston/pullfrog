@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import arg from "arg";
 import pc from "picocolors";
 import { runCli as runAuthCli } from "./commands/auth.ts";
+import { runCli as runAzdoCli } from "./commands/azdo.ts";
 import { runCli as runConfigCli } from "./commands/config.ts";
 import { runCli as runConsoleCli } from "./commands/console.ts";
 import { runCli as runGhaCli } from "./commands/gha.ts";
@@ -23,6 +24,7 @@ function printMainUsage(stream: typeof console.log): void {
   stream("  secret      list secret names, save or delete scoped credentials");
   stream("  init        install pullfrog on the current repository and open its dashboard");
   stream("  auth        manage provider credentials for the current repository");
+  stream("  azdo        run Pullfrog from Azure Repos / Azure Pipelines");
   stream("  watch       stream a PR's activity as one JSON line per event");
   stream("  mcp         run a stdio MCP server exposing PR activity as an agent tool");
   stream("");
@@ -97,6 +99,15 @@ async function run(): Promise<void> {
 
   if (command === "gha") {
     await runGhaCli({
+      args: commandArgs,
+      prog: PROG,
+      showHelp: globalParsed["--help"] === true,
+    });
+    return;
+  }
+
+  if (command === "azdo") {
+    await runAzdoCli({
       args: commandArgs,
       prog: PROG,
       showHelp: globalParsed["--help"] === true,

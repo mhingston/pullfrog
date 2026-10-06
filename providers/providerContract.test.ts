@@ -1,0 +1,481 @@
+import {
+  AzureDevOpsPullRequestDescriptionMutator,
+  AzureDevOpsPullRequestProvider,
+  azureDevOpsValidationEvent,
+  type AzureDevOpsMutationApi,
+  type AzureDevOpsReviewApi,
+} from "./azureDevOps.ts";
+import {
+  GitHubPullRequestDescriptionMutator,
+  GitHubPullRequestProvider,
+  type GitHubMutationApi,
+  type GitHubReviewApi,
+} from "./github.ts";
+import { runPullRequestReview } from "./review.ts";
+import type {
+  PullRequestDescriptionMutator,
+  PullRequestReviewProvider,
+} from "./types.ts";
+import type { AzureDevOpsContext } from "../utils/azureDevOps.ts";
+
+const sourceSha = "0123456789abcdef0123456789abcdef01234567";
+const newerSha = "fedcba9876543210fedcba9876543210fedcba98";
+const trustedAuthorId = "pullfrog-service-id";
+
+function azureFixture(): {
+  provider: PullRequestReviewProvider;
+  published: Array<{ body: string; sourceSha: string }>;
+} {
+  const ctx: AzureDevOpsContext = {
+    collectionUri: "https://dev.azure.com/acme/",
+    project: "Platform",
+    repositoryId: "repo-guid",
+    repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+    defaultBranch: "main",
+    pullRequestId: 42,
+    sourceBranch: "feature/provider",
+    sourceCommitId: sourceSha,
+    targetBranch: "main",
+    authorization: "Bearer test",
+  };
+  const published: Array<{ body: string; sourceSha: string }> = [];
+  const client: AzureDevOpsReviewApi = {
+    async getPullRequest() {
+      return {
+        pullRequestId: 42,
+        title: "provider boundary",
+        description: "shared review contract",
+        sourceRefName: "refs/heads/feature/provider",
+        targetRefName: "refs/heads/main",
+      };
+    },
+    async upsertReviewThread(body, expectedSourceSha, _trustedAuthorId) {
+      published.push({ body, sourceSha: expectedSourceSha });
+      return { published: true, created: false, threadId: 17 };
+    },
+  };
+  return {
+    provider: new AzureDevOpsPullRequestProvider(ctx, client, trustedAuthorId),
+    published,
+  };
+}
+
+function githubFixture(): {
+  provider: PullRequestReviewProvider;
+  published: Array<{ body: string; sourceSha: string }>;
+} {
+  const published: Array<{ body: string; sourceSha: string }> = [];
+  const api: GitHubReviewApi = {
+    pulls: {
+      async get() {
+        return {
+          data: {
+            id: 9001,
+            number: 42,
+            title: "provider boundary",
+            body: "shared review contract",
+            head: { ref: "feature/provider", sha: sourceSha },
+            base: { ref: "main" },
+          },
+        };
+      },
+      async createReview(params) {
+        published.push({ body: params.body, sourceSha: params.commit_id });
+        return { data: { id: 23 } };
+      },
+    },
+  };
+  return {
+    provider: new GitHubPullRequestProvider({
+      api,
+      owner: "acme",
+      repo: "widget",
+      pullNumber: 42,
+    }),
+    published,
+  };
+}
+
+const providerFixtures: Array<[
+  string,
+  () => {
+    provider: PullRequestReviewProvider;
+    published: Array<{ body: string; sourceSha: string }>;
+  },
+]> = [
+  ["Azure DevOps", azureFixture],
+  ["GitHub", githubFixture],
+];
+
+type DescriptionMutationFixture = {
+  mutator: PullRequestDescriptionMutator;
+  updatedDescriptions: string[];
+};
+
+function azureMutationFixture(): DescriptionMutationFixture {
+  const ctx: AzureDevOpsContext = {
+    collectionUri: "https://dev.azure.com/acme/",
+    project: "Platform",
+    repositoryId: "repo-guid",
+    repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+    defaultBranch: "main",
+    pullRequestId: 42,
+    sourceBranch: "feature/provider",
+    sourceCommitId: sourceSha,
+    targetBranch: "main",
+    authorization: "Bearer test",
+  };
+  const updatedDescriptions: string[] = [];
+  const client: AzureDevOpsMutationApi = {
+    async updatePullRequestDescription(description) {
+      updatedDescriptions.push(description);
+      return {
+        pullRequestId: 42,
+        title: "provider boundary",
+        description,
+        sourceRefName: "refs/heads/feature/provider",
+        targetRefName: "refs/heads/main",
+      };
+    },
+  };
+  return {
+    mutator: new AzureDevOpsPullRequestDescriptionMutator(ctx, client),
+    updatedDescriptions,
+  };
+}
+
+function githubMutationFixture(): DescriptionMutationFixture {
+  const updatedDescriptions: string[] = [];
+  const api: GitHubMutationApi = {
+    pulls: {
+      async update(params) {
+        updatedDescriptions.push(params.body);
+        return {
+          data: {
+            id: 9001,
+            number: 42,
+            title: "provider boundary",
+            body: params.body,
+            head: { ref: "feature/provider", sha: sourceSha },
+            base: { ref: "main" },
+          },
+        };
+      },
+    },
+  };
+  return {
+    mutator: new GitHubPullRequestDescriptionMutator({
+      api,
+      owner: "acme",
+      repo: "widget",
+      pullNumber: 42,
+    }),
+    updatedDescriptions,
+  };
+}
+
+const descriptionMutationFixtures: Array<
+  [string, () => DescriptionMutationFixture, string, string]
+> = [
+  ["Azure DevOps", azureMutationFixture, "azure-devops", "repo-guid"],
+  ["GitHub", githubMutationFixture, "github", "acme/widget"],
+];
+
+describe.each(descriptionMutationFixtures)(
+  "%s PR description mutation contract",
+  (_name, fixture, provider, repositoryId) => {
+    it("updates one provider-neutral metadata field and normalizes the result", async () => {
+      const { mutator, updatedDescriptions } = fixture();
+
+      const result = await mutator.updatePullRequestDescription({
+        description: "updated description",
+      });
+
+      expect(updatedDescriptions).toEqual(["updated description"]);
+      expect(result).toEqual({
+        provider,
+        repository: { id: repositoryId },
+        id: provider === "github" ? "9001" : "42",
+        number: 42,
+        title: "provider boundary",
+        description: "updated description",
+      });
+    });
+  }
+);
+
+describe("Azure PR description mutation safety", () => {
+  it("passes the validation source SHA into the Azure mutation API", async () => {
+    const ctx: AzureDevOpsContext = {
+      collectionUri: "https://dev.azure.com/acme/",
+      project: "Platform",
+      repositoryId: "repo-guid",
+      repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+      defaultBranch: "main",
+      pullRequestId: 42,
+      sourceBranch: "feature/provider",
+      sourceCommitId: sourceSha,
+      targetBranch: "main",
+      authorization: "Bearer test",
+    };
+    const update = vi.fn(async (description: string, expectedSourceCommitId?: string) => ({
+      pullRequestId: 42,
+      title: "provider boundary",
+      description,
+      sourceRefName: "refs/heads/feature/provider",
+      targetRefName: "refs/heads/main",
+    }));
+    const mutator = new AzureDevOpsPullRequestDescriptionMutator(ctx, {
+      updatePullRequestDescription: update,
+    });
+
+    await mutator.updatePullRequestDescription({
+      description: "updated description",
+    });
+
+    expect(update).toHaveBeenCalledWith("updated description", sourceSha);
+  });
+});
+
+describe("PR description mutation response identity", () => {
+  it("rejects an Azure response for a different pull request", async () => {
+    const ctx: AzureDevOpsContext = {
+      collectionUri: "https://dev.azure.com/acme/",
+      project: "Platform",
+      repositoryId: "repo-guid",
+      repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+      defaultBranch: "main",
+      pullRequestId: 42,
+      sourceBranch: "feature/provider",
+      sourceCommitId: sourceSha,
+      targetBranch: "main",
+      authorization: "Bearer test",
+    };
+    const client: AzureDevOpsMutationApi = {
+      async updatePullRequestDescription(description) {
+        return {
+          pullRequestId: 43,
+          title: "wrong PR",
+          description,
+          sourceRefName: "refs/heads/feature/provider",
+          targetRefName: "refs/heads/main",
+        };
+      },
+    };
+
+    const mutator = new AzureDevOpsPullRequestDescriptionMutator(ctx, client);
+    await expect(
+      mutator.updatePullRequestDescription({ description: "updated description" })
+    ).rejects.toThrow("unexpected pull request 43");
+  });
+
+  it("rejects a GitHub response for a different pull request", async () => {
+    const api: GitHubMutationApi = {
+      pulls: {
+        async update(params) {
+          return {
+            data: {
+              id: 9002,
+              number: 43,
+              title: "wrong PR",
+              body: params.body,
+              head: { ref: "feature/provider", sha: sourceSha },
+              base: { ref: "main" },
+            },
+          };
+        },
+      },
+    };
+
+    const mutator = new GitHubPullRequestDescriptionMutator({
+      api,
+      owner: "acme",
+      repo: "widget",
+      pullNumber: 42,
+    });
+    await expect(
+      mutator.updatePullRequestDescription({ description: "updated description" })
+    ).rejects.toThrow("unexpected pull request #43");
+  });
+});
+
+describe.each(providerFixtures)("%s provider contract", (_name, fixture) => {
+  it("normalizes PR identity and publishes against the reviewed source SHA", async () => {
+    const { provider, published } = fixture();
+    const result = await runPullRequestReview({
+      provider,
+      review: async (pullRequest) => {
+        expect(pullRequest.number).toBe(42);
+        expect(pullRequest.title).toBe("provider boundary");
+        expect(pullRequest.source).toEqual({
+          ref: "feature/provider",
+          sha: sourceSha,
+        });
+        expect(pullRequest.target).toEqual({ ref: "main" });
+        return "review body";
+      },
+    });
+
+    expect(result.publication?.published).toBe(true);
+    expect(result.publication?.consistency).toBe(
+      _name === "Azure DevOps" ? "source-convergent" : "best-effort"
+    );
+    expect(published).toEqual([{ body: "review body", sourceSha }]);
+  });
+
+  it("supports dry-run orchestration without invoking publication", async () => {
+    const { provider, published } = fixture();
+    const result = await runPullRequestReview({
+      provider,
+      dryRun: true,
+      review: async () => "dry review",
+    });
+
+    expect(result.body).toBe("dry review");
+    expect(result.publication).toBeUndefined();
+    expect(published).toHaveLength(0);
+  });
+});
+
+describe("provider-specific stale publication", () => {
+  it("normalizes Azure stale publication", async () => {
+    const ctx: AzureDevOpsContext = {
+      collectionUri: "https://dev.azure.com/acme/",
+      project: "Platform",
+      repositoryId: "repo-guid",
+      repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+      defaultBranch: "main",
+      pullRequestId: 42,
+      sourceBranch: "feature/provider",
+      sourceCommitId: sourceSha,
+      targetBranch: "main",
+      authorization: "Bearer test",
+    };
+    const client: AzureDevOpsReviewApi = {
+      async getPullRequest() {
+        return {
+          pullRequestId: 42,
+          title: "provider boundary",
+          sourceRefName: "refs/heads/feature/provider",
+          targetRefName: "refs/heads/main",
+        };
+      },
+      async upsertReviewThread() {
+        return { published: false, supersededBy: newerSha };
+      },
+    };
+
+    const provider = new AzureDevOpsPullRequestProvider(ctx, client, trustedAuthorId);
+    await expect(
+      provider.publishReview({ body: "old", sourceSha })
+    ).resolves.toEqual({
+      published: false,
+      consistency: "source-convergent",
+      supersededBy: newerSha,
+    });
+  });
+
+  it("suppresses a GitHub review when the head already moved", async () => {
+    let currentSha = newerSha;
+    const createReview = vi.fn(async () => ({ data: { id: 23 } }));
+    const api: GitHubReviewApi = {
+      pulls: {
+        async get() {
+          return {
+            data: {
+              id: 9001,
+              number: 42,
+              title: "provider boundary",
+              body: "",
+              head: { ref: "feature/provider", sha: currentSha },
+              base: { ref: "main" },
+            },
+          };
+        },
+        createReview,
+      },
+    };
+    const provider = new GitHubPullRequestProvider({
+      api,
+      owner: "acme",
+      repo: "widget",
+      pullNumber: 42,
+    });
+
+    await expect(
+      provider.publishReview({ body: "old", sourceSha })
+    ).resolves.toEqual({
+      published: false,
+      consistency: "best-effort",
+      supersededBy: newerSha,
+    });
+    expect(createReview).not.toHaveBeenCalled();
+  });
+
+  it("reports when GitHub advances during publication", async () => {
+    let currentSha = sourceSha;
+    const createReview = vi.fn(async () => {
+      currentSha = newerSha;
+      return { data: { id: 23 } };
+    });
+    const api: GitHubReviewApi = {
+      pulls: {
+        async get() {
+          return {
+            data: {
+              id: 9001,
+              number: 42,
+              title: "provider boundary",
+              body: "",
+              head: { ref: "feature/provider", sha: currentSha },
+              base: { ref: "main" },
+            },
+          };
+        },
+        createReview,
+      },
+    };
+    const provider = new GitHubPullRequestProvider({
+      api,
+      owner: "acme",
+      repo: "widget",
+      pullNumber: 42,
+    });
+
+    await expect(
+      provider.publishReview({ body: "old", sourceSha })
+    ).resolves.toEqual({
+      published: true,
+      created: true,
+      id: "23",
+      consistency: "best-effort",
+      supersededBy: newerSha,
+    });
+    expect(createReview).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Azure Pipelines event adapter", () => {
+  it("normalizes build validation into the provider-neutral event envelope", () => {
+    const ctx: AzureDevOpsContext = {
+      collectionUri: "https://dev.azure.com/acme/",
+      project: "Platform",
+      repositoryId: "repo-guid",
+      repositoryUri: "https://dev.azure.com/acme/Platform/_git/widget",
+      defaultBranch: "main",
+      pullRequestId: 42,
+      sourceBranch: "feature/provider",
+      sourceCommitId: sourceSha.toUpperCase(),
+      targetBranch: "main",
+      authorization: "Bearer test",
+    };
+
+    expect(azureDevOpsValidationEvent(ctx)).toEqual({
+      provider: "azure-devops",
+      repository: { id: "repo-guid" },
+      pullRequest: { id: "42", number: 42 },
+      sourceSha,
+      kind: "validation",
+    });
+  });
+});
